@@ -8,6 +8,19 @@ import { launch, type App } from '../src/index'
 const www = mkdtempSync(join(tmpdir(), 'barlo-test-www-'))
 writeFileSync(join(www, 'index.html'), '<!doctype html><title>Fixture</title><h1 id="t">hello</h1>')
 writeFileSync(join(www, 'nested.html'), '<!doctype html><p id="n">nested</p>')
+// A classic script's top-level declarations land on `window`, over the bridge.
+writeFileSync(
+  join(www, 'shadow.html'),
+  `<!doctype html><script>async function add(a, b) { return 'page' }</script>`,
+)
+writeFileSync(
+  join(www, 'wrapped.html'),
+  `<!doctype html><script>;(() => { async function add() { return 'page' } })()</script>`,
+)
+writeFileSync(
+  join(www, 'module.html'),
+  `<!doctype html><script type="module">async function add() { return 'page' }</script>`,
+)
 
 let app: App
 
@@ -100,6 +113,34 @@ describe('exposeFunction', () => {
 
   test('accepts a serialized function with arguments', async () => {
     expect(await app.evaluate((a: number, b: number) => a * b, 6, 7)).toBe(42)
+  })
+})
+
+describe('shadowing', () => {
+  // Reported from ports-cli, where a page's own `async function kill` replaced
+  // the exposed `kill` and the button called the page back instead of Bun.
+  test('reports an exposed name the page declares over', async () => {
+    await app.load('shadow.html')
+    expect(await app.mainWindow().shadowedFunctions()).toEqual(['add'])
+    // The page really did take it over, which is what makes this silent.
+    expect(await app.evaluate<string>('add(1, 2)')).toBe('page')
+  })
+
+  test('stays quiet when the page wraps its script', async () => {
+    await app.load('wrapped.html')
+    expect(await app.mainWindow().shadowedFunctions()).toEqual([])
+    expect(await app.evaluate<number>('add(1, 2)')).toBe(3)
+  })
+
+  test('stays quiet for a module script, whose declarations are scoped', async () => {
+    await app.load('module.html')
+    expect(await app.mainWindow().shadowedFunctions()).toEqual([])
+    expect(await app.evaluate<number>('add(1, 2)')).toBe(3)
+  })
+
+  test('a reload reinstalls the bridge over the page', async () => {
+    await app.load('index.html')
+    expect(await app.mainWindow().shadowedFunctions()).toEqual([])
   })
 })
 

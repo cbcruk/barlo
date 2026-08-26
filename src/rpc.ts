@@ -34,6 +34,15 @@ export const RESOLVER = '__barlo_resolve__'
  */
 export const CHANNEL = '__barlo_call__'
 
+/**
+ * Name of the page-side global recording which function each exposed name was
+ * installed as.
+ *
+ * Only used to notice that a page has since replaced one. See
+ * {@linkcode shadowedExpression}.
+ */
+export const REGISTRY = '__barlo_installed__'
+
 /** One call from the page to a function exposed on the Bun side. */
 export interface RpcCall {
   /** Sequence number, unique per document, used to match the reply. */
@@ -78,8 +87,14 @@ export function bootstrapSource(names: Iterable<string>): string {
     });
     Object.defineProperty(globalThis, ${JSON.stringify(CHANNEL)}, { value: call });
   }
+  if (!globalThis.${REGISTRY}) {
+    Object.defineProperty(globalThis, ${JSON.stringify(REGISTRY)}, { value: {} });
+  }
+  const registry = globalThis.${REGISTRY};
   for (const name of ${JSON.stringify([...names])}) {
-    globalThis[name] = (...args) => call(name, args);
+    const fn = (...args) => call(name, args);
+    registry[name] = fn;
+    globalThis[name] = fn;
   }
 })();`
 }
@@ -99,4 +114,23 @@ export function bootstrapSource(names: Iterable<string>): string {
 export function resolverExpression(id: number, ok: boolean, value: unknown): string {
   const payload = ok ? value : String((value as Error)?.message ?? value)
   return `${RESOLVER}(${id}, ${ok}, ${JSON.stringify(payload ?? null)})`
+}
+
+/**
+ * Builds the expression listing exposed names the page has since replaced.
+ *
+ * A classic script's top-level `function` and `var` declarations become
+ * properties of `window`, which is where the bridge installs its functions, so
+ * a page declaring `function kill` silently takes over an exposed `kill` and
+ * calls itself instead. Comparing each global against what was installed is
+ * the only way to notice: locking the property down is not an option, since a
+ * non-configurable global makes the page's own declaration throw and kills the
+ * script outright.
+ *
+ * @returns An expression evaluating to an array of shadowed names.
+ */
+export function shadowedExpression(): string {
+  return `Object.keys(globalThis.${REGISTRY} ?? {}).filter(
+    n => globalThis[n] !== globalThis.${REGISTRY}[n],
+  )`
 }

@@ -92,6 +92,33 @@ export declare class Window {
      */
     load(uri?: string, params?: Record<string, string>): Promise<void>;
     /**
+     * Lists exposed functions the loaded page has replaced with its own globals.
+     *
+     * A classic script's top-level `function` and `var` declarations become
+     * properties of `window`, which is where {@linkcode App.exposeFunction}
+     * installs its functions. A page declaring `function kill` therefore takes
+     * over an exposed `kill`, and calls from the page reach the page itself
+     * instead of Bun — silently, since the call still returns a promise.
+     *
+     * Wrap the page's script so it declares nothing globally, use
+     * `<script type="module">`, or expose the function under a name the page does
+     * not declare. barlo warns about this automatically after each load; this
+     * method is for asserting on it in tests.
+     *
+     * @returns The shadowed names, empty when the bridge is intact.
+     *
+     * @example Guarding the bridge in a test
+     * ```ts
+     * import { launch } from "barlo";
+     *
+     * const app = await launch();
+     *
+     * await app.load("index.html");
+     * console.assert((await app.mainWindow().shadowedFunctions()).length === 0);
+     * ```
+     */
+    shadowedFunctions(): Promise<string[]>;
+    /**
      * Runs code in the page and returns its result.
      *
      * A function is serialized and called with the given arguments, which means

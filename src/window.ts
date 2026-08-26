@@ -5,7 +5,7 @@
  */
 
 import type { CDPSession } from './cdp'
-import { BINDING, bootstrapSource, resolverExpression, type RpcCall } from './rpc'
+import { BINDING, bootstrapSource, resolverExpression, shadowedExpression, type RpcCall } from './rpc'
 
 /**
  * A window's position and size in screen pixels.
@@ -98,7 +98,10 @@ export class Window {
       if (params.name === BINDING) void this.#onBindingCalled(params.payload)
     })
     await this.syncBridge()
-    this.session.on('Page.loadEventFired', () => void this.#applyTitle())
+    this.session.on('Page.loadEventFired', () => {
+      void this.#applyTitle()
+      void this.#warnAboutShadowing()
+    })
   }
 
   /**
@@ -187,6 +190,48 @@ export class Window {
     await this.session.send('Page.navigate', { url: url.href })
     await loaded
     await this.#applyTitle()
+  }
+
+  /**
+   * Lists exposed functions the loaded page has replaced with its own globals.
+   *
+   * A classic script's top-level `function` and `var` declarations become
+   * properties of `window`, which is where {@linkcode App.exposeFunction}
+   * installs its functions. A page declaring `function kill` therefore takes
+   * over an exposed `kill`, and calls from the page reach the page itself
+   * instead of Bun — silently, since the call still returns a promise.
+   *
+   * Wrap the page's script so it declares nothing globally, use
+   * `<script type="module">`, or expose the function under a name the page does
+   * not declare. barlo warns about this automatically after each load; this
+   * method is for asserting on it in tests.
+   *
+   * @returns The shadowed names, empty when the bridge is intact.
+   *
+   * @example Guarding the bridge in a test
+   * ```ts
+   * import { launch } from "barlo";
+   *
+   * const app = await launch();
+   *
+   * await app.load("index.html");
+   * console.assert((await app.mainWindow().shadowedFunctions()).length === 0);
+   * ```
+   */
+  async shadowedFunctions(): Promise<string[]> {
+    if (this.#closed) return []
+    return this.evaluate<string[]>(shadowedExpression()).catch(() => [])
+  }
+
+  async #warnAboutShadowing(): Promise<void> {
+    const shadowed = await this.shadowedFunctions()
+    if (shadowed.length === 0) return
+    console.warn(
+      `barlo: the page replaced ${shadowed.map(n => `window.${n}`).join(', ')}, so calls ` +
+        `reach the page instead of the exposed function. A classic script's top-level ` +
+        `\`function\` and \`var\` declarations become window properties — wrap the page ` +
+        `script, use <script type="module">, or expose under a different name.`,
+    )
   }
 
   async #applyTitle(): Promise<void> {

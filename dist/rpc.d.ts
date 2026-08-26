@@ -30,6 +30,14 @@ export declare const RESOLVER = "__barlo_resolve__";
  * {@linkcode bootstrapSource} safe to run twice.
  */
 export declare const CHANNEL = "__barlo_call__";
+/**
+ * Name of the page-side global recording which function each exposed name was
+ * installed as.
+ *
+ * Only used to notice that a page has since replaced one. See
+ * {@linkcode shadowedExpression}.
+ */
+export declare const REGISTRY = "__barlo_installed__";
 /** One call from the page to a function exposed on the Bun side. */
 export interface RpcCall {
     /** Sequence number, unique per document, used to match the reply. */
@@ -66,4 +74,18 @@ export declare function bootstrapSource(names: Iterable<string>): string;
  * @returns An expression to run through `Runtime.evaluate`.
  */
 export declare function resolverExpression(id: number, ok: boolean, value: unknown): string;
+/**
+ * Builds the expression listing exposed names the page has since replaced.
+ *
+ * A classic script's top-level `function` and `var` declarations become
+ * properties of `window`, which is where the bridge installs its functions, so
+ * a page declaring `function kill` silently takes over an exposed `kill` and
+ * calls itself instead. Comparing each global against what was installed is
+ * the only way to notice: locking the property down is not an option, since a
+ * non-configurable global makes the page's own declaration throw and kills the
+ * script outright.
+ *
+ * @returns An expression evaluating to an array of shadowed names.
+ */
+export declare function shadowedExpression(): string;
 //# sourceMappingURL=rpc.d.ts.map

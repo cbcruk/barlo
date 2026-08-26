@@ -89,7 +89,23 @@ Longer prefixes win; returning `undefined` falls through to the next route.
 - `app.exposeFunction(name, fn)` — makes `fn` callable from the page as `window[name]`, returning a
   promise. Arguments and results round-trip as JSON; thrown errors reject on the page side. Names
   exposed after load land on the current document too, without a reload.
+- `window.shadowedFunctions()` — exposed names the page has taken back (see below).
 - `app.evaluate(fnOrExpression, ...args)` — run code in the page and get the value back.
+
+#### The page can take the name back
+
+A classic script's top-level `function` and `var` declarations become properties of `window`, which
+is exactly where the bridge installs its functions. A page containing `function kill` replaces an
+exposed `kill`, and the page's own calls then reach the page instead of Bun — silently, because the
+call still returns a promise.
+
+barlo cannot prevent it: locking the property down makes the page's declaration throw and kills the
+script outright. So it detects it instead, warning after each load, with
+`window.shadowedFunctions()` returning the names for a test to assert on.
+
+Avoid it by wrapping the page's script so it declares nothing globally, using
+`<script type="module">`, whose top-level declarations are module-scoped, or exposing under a name
+the page does not declare — `__kill` rather than `kill`.
 
 ### Windows
 

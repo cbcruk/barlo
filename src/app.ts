@@ -202,8 +202,18 @@ export class App {
    * the first {@linkcode App.load}. Windows opened later inherit it. Exposing
    * the same name twice replaces the earlier function.
    *
+   * > The page can take the name back. A classic script's top-level `function`
+   * > and `var` declarations become properties of `window`, so a page
+   * > containing `function kill` replaces an exposed `kill` and its own calls
+   * > reach itself instead of Bun — silently, since the call still returns a
+   * > promise. Wrap the page's script so it declares nothing globally, use
+   * > `<script type="module">`, or expose under a name the page does not
+   * > declare, such as `__kill`. barlo warns after each load, and
+   * > {@linkcode Window.shadowedFunctions} reports it for tests.
+   *
    * @param name The global to define on the page. Overwrites an existing
-   * global of that name.
+   * global of that name, and can in turn be overwritten by one the page
+   * declares.
    * @param fn The function to run in Bun. May be async.
    *
    * @example Reading a file for the page
