@@ -1,0 +1,132 @@
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { launch, type App } from '../src/index'
+
+const www = mkdtempSync(join(tmpdir(), 'barlo-test-www-'))
+writeFileSync(join(www, 'index.html'), '<!doctype html><title>Fixture</title><h1 id="t">hello</h1>')
+writeFileSync(join(www, 'nested.html'), '<!doctype html><p id="n">nested</p>')
+
+let app: App
+
+beforeAll(async () => {
+  app = await launch({ width: 640, height: 480, title: 'Barlo Test' })
+  app.serveFolder(www)
+  app.serveHandler(request =>
+    new URL(request.url).pathname === '/api/ping' ? new Response('pong') : undefined,
+  )
+  app.serveEmbedded({ 'hi.txt': 'embedded!' }, '/embedded')
+  await app.exposeFunction('add', (a: number, b: number) => a + b)
+  await app.exposeFunction('boom', () => {
+    throw new Error('kaboom')
+  })
+  await app.load('index.html')
+}, 60_000)
+
+afterAll(() => app?.exit())
+
+describe('window', () => {
+  test('opens a real, non-headless window', async () => {
+    expect(await app.evaluate<string>('navigator.userAgent')).not.toContain('Headless')
+  })
+
+  test('runs in app mode with no browser chrome', async () => {
+    // A tabbed window spends ~87px on the toolbar; an app window only loses
+    // a few pixels of frame, which varies by platform and window manager.
+    expect(await app.evaluate<number>('outerHeight - innerHeight')).toBeLessThan(30)
+  })
+
+  test('honours the requested size', async () => {
+    expect(await app.evaluate<string>('[outerWidth, outerHeight].join("x")')).toBe('640x480')
+  })
+
+  test('applies the configured title over the document title', async () => {
+    expect(await app.evaluate<string>('document.title')).toBe('Barlo Test')
+  })
+
+  test('resizes via bounds', async () => {
+    await app.mainWindow().setBounds({ width: 900, height: 700 })
+    await Bun.sleep(300)
+    expect(await app.evaluate<string>('[outerWidth, outerHeight].join("x")')).toBe('900x700')
+    expect((await app.mainWindow().bounds()).width).toBe(900)
+  })
+})
+
+describe('serving', () => {
+  test('serves the folder', async () => {
+    expect(await app.evaluate<string>('document.getElementById("t").textContent')).toBe('hello')
+  })
+
+  test('navigates to another served file', async () => {
+    await app.load('nested.html')
+    expect(await app.evaluate<string>('document.getElementById("n").textContent')).toBe('nested')
+    await app.load('index.html')
+  })
+
+  test('serves an embedded file map', async () => {
+    expect(await app.evaluate<string>('fetch("/embedded/hi.txt").then(r => r.text())')).toBe('embedded!')
+  })
+
+  test('falls through to a custom handler', async () => {
+    expect(await app.evaluate<string>('fetch("/api/ping").then(r => r.text())')).toBe('pong')
+  })
+
+  test('refuses paths escaping the served folder', async () => {
+    expect(await app.evaluate<number>('fetch("/../../etc/passwd").then(r => r.status)')).toBe(404)
+  })
+})
+
+describe('exposeFunction', () => {
+  test('round-trips arguments and return values', async () => {
+    expect(await app.evaluate<number>('add(2, 3)')).toBe(5)
+  })
+
+  test('survives a reload', async () => {
+    await app.load('index.html')
+    expect(await app.evaluate<number>('add(10, 20)')).toBe(30)
+  })
+
+  test('propagates errors to the page', async () => {
+    expect(await app.evaluate<string>('boom().then(() => "no throw", e => e.message)')).toBe('kaboom')
+  })
+
+  test('exposes functions added after load', async () => {
+    await app.exposeFunction('late', () => 'late-ok')
+    await app.load('index.html')
+    expect(await app.evaluate<string>('late()')).toBe('late-ok')
+  })
+
+  test('accepts a serialized function with arguments', async () => {
+    expect(await app.evaluate((a: number, b: number) => a * b, 6, 7)).toBe(42)
+  })
+})
+
+describe('multiple windows', () => {
+  test('opens a second app window and keeps the bridge working', async () => {
+    const second = await app.createWindow('nested.html')
+    try {
+      expect(app.windows().length).toBe(2)
+      expect(await second.evaluate<string>('document.getElementById("n").textContent')).toBe('nested')
+      expect(await second.evaluate<number>('add(4, 5)')).toBe(9)
+      expect(await second.evaluate<number>('outerHeight - innerHeight')).toBeLessThan(30)
+      // The main window is untouched.
+      expect(await app.evaluate<string>('document.getElementById("t").textContent')).toBe('hello')
+    } finally {
+      await second.close()
+    }
+    expect(app.windows().length).toBe(1)
+  }, 60_000)
+})
+
+describe('lifecycle', () => {
+  test('fires onExit when the app exits', async () => {
+    const solo = await launch({ width: 400, height: 300 })
+    let exited = false
+    solo.onExit(() => (exited = true))
+    solo.exit()
+    expect(exited).toBe(true)
+    expect(solo.exited).toBe(true)
+  }, 60_000)
+})

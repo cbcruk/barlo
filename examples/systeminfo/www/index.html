@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>System Info</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 system-ui, sans-serif; margin: 0; padding: 32px; }
+  h1 { font-size: 20px; margin: 0 0 20px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; margin: 0; }
+  dt { opacity: 0.6; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+</style>
+<h1>System Info</h1>
+<dl id="out"></dl>
+<script type="module">
+  // `systemInfo` was exposed from Bun; it arrives as a plain async function.
+  const info = await window.systemInfo()
+  document.getElementById('out').innerHTML = Object.entries(info)
+    .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`)
+    .join('')
+</script>

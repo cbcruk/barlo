@@ -1,0 +1,130 @@
+# barlo
+
+Build desktop applications with [Bun](https://bun.com) and the Chrome you already have.
+
+barlo is a port of [GoogleChromeLabs/carlo](https://github.com/GoogleChromeLabs/carlo), which was
+archived in April 2026. Same idea as the original: serve your web app from the runtime, open it in a
+chrome-less Chrome window, and let the page call back into system-capable code. No bundled Chromium,
+and — unlike Carlo — no dependencies at all.
+
+```ts
+import { launch } from 'barlo'
+
+const app = await launch({ title: 'Hello', width: 800, height: 600 })
+
+app.serveFolder('./www')
+await app.exposeFunction('cwd', () => process.cwd())
+await app.load('index.html')
+```
+
+```html
+<script type="module">
+  document.body.textContent = await window.cwd()
+</script>
+```
+
+## Why not `Bun.WebView`?
+
+This project started from the assumption that Bun 1.3.12's `Bun.WebView` could replace Carlo's
+Puppeteer dependency and drive a desktop window directly. It cannot, and it is worth being explicit
+about why:
+
+- `Bun.WebView` is a **headless browser automation API** — a built-in Puppeteer, not a GUI toolkit.
+  `new Bun.WebView({ headless: false })` throws `headless: false is not yet implemented`.
+- Its `backend.argv` escape hatch does not help. Chrome decides it is headless from the *presence* of
+  the `--headless` switch, so `--headless=false` still yields a `HeadlessChrome` user agent.
+- Connecting it to a Chrome you launched yourself (`backend: { type: 'chrome', url }`) does open a
+  live connection, but the view drives a target it creates via `Target.createTarget` — a normal
+  tabbed window (~87px of toolbar), not your app window.
+
+What Bun genuinely brings is everything *around* the window: a built-in HTTP server, a WebSocket
+client good enough to speak CDP directly, and `bun build --compile`. So barlo spawns Chrome in app
+mode itself and talks CDP over a ~120-line client. That is Carlo's architecture, minus Puppeteer.
+
+## Install
+
+```sh
+bun add barlo
+```
+
+Requires Bun and a locally installed Chrome, Chromium, Edge, or Brave. barlo checks the usual
+per-platform locations and Playwright's browser cache; override with `BARLO_CHROME_PATH`.
+
+## API
+
+### `launch(options?): Promise<App>`
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `title` | — | Applied after every navigation, overriding the document title |
+| `width` / `height` | `800` / `600` | Initial window size |
+| `left` / `top` | — | Initial window position |
+| `executablePath` | auto-detected | Chrome binary |
+| `args` | `[]` | Extra Chrome switches, appended last |
+| `userDataDir` | temporary | Pass a stable path to persist cookies and localStorage |
+| `verbose` | `false` | Forward Chrome's stderr, for when Chrome dies silently |
+| `timeout` | `20000` | Milliseconds to wait for Chrome to come up |
+
+### Serving
+
+- `app.serveFolder(folder, prefix?)` — files from disk, refusing paths that escape the folder.
+- `app.serveEmbedded(files, prefix?)` — an in-memory `path -> contents` map.
+- `app.serveOrigin(base, prefix?)` — reverse-proxy a prefix onto a remote origin, e.g. a dev server.
+- `app.serveHandler(handler)` — a `Request => Response | undefined` fallthrough handler.
+
+Longer prefixes win; returning `undefined` falls through to the next route.
+
+### Bridge
+
+- `app.exposeFunction(name, fn)` — makes `fn` callable from the page as `window[name]`, returning a
+  promise. Arguments and results round-trip as JSON; thrown errors reject on the page side. Names
+  exposed after load land on the current document too, without a reload.
+- `app.evaluate(fnOrExpression, ...args)` — run code in the page and get the value back.
+
+### Windows
+
+`app.mainWindow()`, `app.windows()`, `app.createWindow(uri?)`, and on a `Window`:
+`load`, `evaluate`, `screenshot`, `bounds`, `setBounds`, `fullscreen`, `maximize`, `minimize`,
+`bringToFront`, `onClose`, `close`.
+
+Multi-window works the way Carlo's did — re-running the Chrome binary against the same profile, which
+the running browser process handles. CDP has no app-mode window type, so there is no better route.
+
+### Lifecycle
+
+`app.onExit(handler)` fires when the last window closes or Chrome quits. `app.exit()` tears down the
+connection, the server, and Chrome, and removes the profile if barlo created it.
+
+## Single-file executables
+
+```sh
+bun build --compile app.ts --outfile myapp
+```
+
+`serveFolder` reads from disk and therefore **does not survive `--compile`** — a compiled binary has
+no `www` folder next to it and every request 404s. Embed the assets instead:
+
+```ts
+import index from './www/index.html' with { type: 'text' }
+
+app.serveEmbedded({ 'index.html': index as unknown as string })
+```
+
+(The cast is needed only because Bun types every `.html` import as an `HTMLBundle` for its bundler.)
+
+The resulting binary is ~79 MB and needs no Node, no `node_modules`, and no Chromium — just the
+browser already on the machine.
+
+## Status and caveats
+
+Verified on Linux/arm64 against Chromium 151 under Xvfb: app-mode window with no browser UI,
+requested sizing, folder/embedded/handler serving, the RPC bridge across reloads and windows,
+resizing, multi-window, and the compiled binary. macOS and Windows paths are implemented from the
+documented install locations but are **not yet exercised on those platforms**.
+
+Chrome's `--app` mode is the load-bearing assumption here, exactly as it was for Carlo. Google has
+been narrowing that surface for years, and if it goes, this approach goes with it.
+
+## License
+
+Apache-2.0, matching Carlo.
