@@ -1,0 +1,18 @@
+# barlo
+
+A Bun port of GoogleChromeLabs/carlo: serve a web app from the runtime, open it
+in a chrome-less Chrome window, and let the page call back into Bun. No bundled
+Chromium and no dependencies. See `README.md` for the architecture and for why
+`Bun.WebView` is not usable for this.
+
+## Rules
+
+@.claude/rules/jsdoc.md
+
+## Working on this repo
+
+- `bun test` needs a real display. On a headless box, run it under Xvfb:
+  `xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test`.
+- Set `BARLO_CHROME_PATH` when there is no system Chrome; Playwright's browser
+  cache works (`bunx playwright install chromium`).
+- `bunx tsc --noEmit` and `bun run docs:check` must pass before committing.

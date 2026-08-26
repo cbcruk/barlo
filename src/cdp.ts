@@ -1,8 +1,14 @@
 /**
- * Minimal Chrome DevTools Protocol client.
+ * Minimal Chrome DevTools Protocol client over a WebSocket.
  *
  * Carlo leaned on Puppeteer for this; Bun ships a WebSocket client, so the
  * whole transport is a few dozen lines and barlo stays dependency-free.
+ *
+ * Sessions are flattened: one socket carries the browser-level connection and
+ * every attached target, distinguished by `sessionId`. This module is internal
+ * plumbing for {@linkcode App} and {@linkcode Window}.
+ *
+ * @module
  */
 
 type Handler = (params: any) => void
@@ -12,21 +18,73 @@ interface Pending {
   reject: (error: Error) => void
 }
 
-/** A CDP session: either the browser-level connection or one attached target. */
+/**
+ * A CDP command and event scope: either the browser itself or one attached
+ * target.
+ *
+ * Commands sent through a session are answered by whatever it is scoped to, so
+ * page-domain commands need a target session while browser-domain commands
+ * such as `Browser.setWindowBounds` need {@linkcode CDPConnection.browser}.
+ */
 export class CDPSession {
+  /**
+   * The session's CDP identifier, or `undefined` for the browser-level
+   * session, whose messages carry no `sessionId`.
+   */
   readonly sessionId: string | undefined
   #connection: CDPConnection
   #handlers = new Map<string, Set<Handler>>()
 
+  /**
+   * Creates a session. Called by {@linkcode CDPConnection}; not useful
+   * directly, since a session must be registered with its connection to
+   * receive events.
+   *
+   * @param connection The connection carrying this session's messages.
+   * @param sessionId The attached target's identifier, omitted for the
+   * browser-level session.
+   */
   constructor(connection: CDPConnection, sessionId?: string) {
     this.#connection = connection
     this.sessionId = sessionId
   }
 
+  /**
+   * Sends a CDP command and resolves with its result.
+   *
+   * @template T The shape of the command's result object.
+   * @param method A domain-qualified method name, such as `"Page.navigate"`.
+   * @param params The command's parameters. Must be JSON-serializable.
+   * @returns The command's `result` object.
+   * @throws When Chrome reports a protocol error, or when the connection
+   * closes while the command is in flight.
+   *
+   * @example Reading the page title
+   * ```ts
+   * import { launch } from "barlo";
+ *
+ * const app = await launch();
+ *
+   * const session = app.mainWindow().session;
+   *
+   * const { result } = await session.send("Runtime.evaluate", {
+   *   expression: "document.title",
+   *   returnByValue: true,
+   * });
+   * ```
+   */
   send<T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     return this.#connection._send(method, params, this.sessionId)
   }
 
+  /**
+   * Subscribes to a CDP event on this session.
+   *
+   * @param event A domain-qualified event name, such as
+   * `"Runtime.bindingCalled"`.
+   * @param handler Called with the event's parameters.
+   * @returns A function that removes the subscription.
+   */
   on(event: string, handler: Handler): () => void {
     let set = this.#handlers.get(event)
     if (!set) this.#handlers.set(event, (set = new Set()))
@@ -39,7 +97,15 @@ export class CDPSession {
     for (const handler of this.#handlers.get(event) ?? []) handler(params)
   }
 
-  /** Attach to a target and get a session scoped to it. */
+  /**
+   * Attaches to a target and returns a session scoped to it.
+   *
+   * Only meaningful on the browser-level session. Attaching twice to the same
+   * target returns the same {@linkcode CDPSession}.
+   *
+   * @param targetId The target to attach to, from `Target.getTargets`.
+   * @returns A session whose commands and events belong to that target.
+   */
   async attach(targetId: string): Promise<CDPSession> {
     const { sessionId } = await this.send<{ sessionId: string }>('Target.attachToTarget', {
       targetId,
@@ -49,6 +115,14 @@ export class CDPSession {
   }
 }
 
+/**
+ * A live WebSocket connection to Chrome's DevTools endpoint.
+ *
+ * Owns the socket, the request/response correlation, and the session table.
+ * When the socket closes, every in-flight command rejects and
+ * `"__disconnected__"` is emitted on {@linkcode CDPConnection.browser}, which
+ * is how {@linkcode App} learns that Chrome went away.
+ */
 export class CDPConnection {
   #socket: WebSocket
   #nextId = 0
@@ -56,6 +130,10 @@ export class CDPConnection {
   #sessions = new Map<string, CDPSession>()
   #closed = false
 
+  /**
+   * The browser-level session, for `Browser.*` and `Target.*` commands and for
+   * the synthetic `"__disconnected__"` event.
+   */
   readonly browser: CDPSession
 
   private constructor(socket: WebSocket) {
@@ -67,6 +145,17 @@ export class CDPConnection {
     socket.onerror = () => this.#abort(new Error('CDP connection errored'))
   }
 
+  /**
+   * Opens a connection to a DevTools WebSocket endpoint.
+   *
+   * The endpoint URL comes from the `DevToolsActivePort` file Chrome writes
+   * into its profile directory.
+   *
+   * @param url A `ws://` DevTools browser endpoint.
+   * @param signal Aborts the attempt while the socket is still opening.
+   * @returns A connection whose socket is open and ready for commands.
+   * @throws When the socket fails to open, or when `signal` aborts first.
+   */
   static async connect(url: string, signal?: AbortSignal): Promise<CDPConnection> {
     const socket = new WebSocket(url)
     await new Promise<void>((resolve, reject) => {
@@ -119,10 +208,17 @@ export class CDPConnection {
     this.browser._emit('__disconnected__', error)
   }
 
+  /** Whether the socket has closed, by request or because Chrome exited. */
   get closed(): boolean {
     return this.#closed
   }
 
+  /**
+   * Closes the socket.
+   *
+   * Idempotent. In-flight commands are left to reject through the socket's
+   * close handler.
+   */
   close(): void {
     if (this.#closed) return
     this.#closed = true
