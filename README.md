@@ -125,6 +125,36 @@ documented install locations but are **not yet exercised on those platforms**.
 Chrome's `--app` mode is the load-bearing assumption here, exactly as it was for Carlo. Google has
 been narrowing that surface for years, and if it goes, this approach goes with it.
 
+## Development
+
+```sh
+bun install
+bun run typecheck    # tsc over src, test, and examples
+bun run docs:check   # every export documented, every @example type-checks
+bun run build        # emit dist/*.d.ts
+bun test             # opens real Chrome windows; needs a display
+```
+
+On a headless machine, run the suite under Xvfb and point barlo at a browser:
+
+```sh
+bunx playwright install chromium
+BARLO_CHROME_PATH=$(echo ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome) \
+  xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test
+```
+
+### Packaging
+
+The published package ships both the TypeScript source and generated
+declarations. The `exports` map sends Bun to `src/index.ts`, so stack traces
+point at real source and there is no bundle step at runtime, while `types`
+resolves to `dist/index.d.ts`, so a consumer never type-checks barlo's
+implementation. `prepack` builds the declarations, so `npm publish` and
+`npm pack` produce them automatically.
+
+Releases run from a `v*` tag, which the workflow checks against the version in
+`package.json`. Publishing needs an `NPM_TOKEN` repository secret.
+
 ## License
 
 Apache-2.0, matching Carlo.

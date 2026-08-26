@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Check documentation
+        run: bun run docs:check
+
+      - name: Build declarations
+        run: bun run build
+
+      # The suite opens real Chrome windows, so it needs a display. Chrome is
+      # preinstalled on ubuntu-latest at /usr/bin/google-chrome, which
+      # findChrome picks up without configuration.
+      - name: Test
+        run: xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test
+
+      - name: Verify the published package
+        run: |
+          npm pack --pack-destination /tmp
+          echo '{"name":"consumer","type":"module","private":true}' > /tmp/consumer-package.json
+          mkdir -p /tmp/consumer && mv /tmp/consumer-package.json /tmp/consumer/package.json
+          cd /tmp/consumer && bun add /tmp/barlo-*.tgz
+          test -f node_modules/barlo/dist/index.d.ts
+          test -f node_modules/barlo/src/index.ts
+          test -f node_modules/barlo/LICENSE
