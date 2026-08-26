@@ -130,8 +130,6 @@ export class App {
     this.#options = options
   }
 
-  // -- serving -------------------------------------------------------------
-
   /**
    * Serves files from a folder on disk. See {@linkcode AppServer.serveFolder}.
    *
@@ -192,8 +190,6 @@ export class App {
     this.#server.serveHandler(handler)
   }
 
-  // -- bridge --------------------------------------------------------------
-
   /**
    * Makes a Bun-side function callable from the page as `window[name]`.
    *
@@ -225,8 +221,6 @@ export class App {
     this.#exposed.set(name, fn)
     await Promise.all(this.#windows.filter(w => !w.closed).map(w => w.syncBridge()))
   }
-
-  // -- lifecycle -----------------------------------------------------------
 
   /**
    * Starts Chrome and opens the first window, cleaning up on failure.
