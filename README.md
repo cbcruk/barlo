@@ -43,9 +43,19 @@ mode itself and talks CDP over a ~120-line client. That is Carlo's architecture,
 
 ## Install
 
+Straight from GitHub, with no npm publish involved:
+
 ```sh
-bun add barlo
+bun add github:cbcruk/barlo
+npm install github:cbcruk/barlo
 ```
+
+Pin a release by appending a tag — `github:cbcruk/barlo#v0.1.0`.
+
+Generated declarations are committed to `dist/` precisely so that this works:
+bun blocks lifecycle scripts by default and installs no devDependencies for git
+dependencies, so nothing can build them at install time. CI fails if the
+committed output drifts from the source.
 
 Requires Bun and a locally installed Chrome, Chromium, Edge, or Brave. barlo checks the usual
 per-platform locations and Playwright's browser cache; override with `BARLO_CHROME_PATH`.
@@ -149,8 +159,12 @@ The published package ships both the TypeScript source and generated
 declarations. The `exports` map sends Bun to `src/index.ts`, so stack traces
 point at real source and there is no bundle step at runtime, while `types`
 resolves to `dist/index.d.ts`, so a consumer never type-checks barlo's
-implementation. `prepack` builds the declarations, so `npm publish` and
-`npm pack` produce them automatically.
+implementation. `prepack` rebuilds the declarations when packing, so a published
+tarball never carries stale output.
+
+`prepare` is deliberately not used: it would run on a git-dependency install,
+where bun installs no devDependencies, and would fail for any consumer who
+trusts the script.
 
 Releases run from a `v*` tag, which the workflow checks against the version in
 `package.json`. Publishing needs an `NPM_TOKEN` repository secret.

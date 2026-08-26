@@ -46,7 +46,7 @@
     "test": "bun test",
     "docs:check": "bun scripts/doccheck.ts",
     "example": "bun examples/systeminfo/main.ts",
-    "prepare": "npm run build"
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/bun": "latest",
