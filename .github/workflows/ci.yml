@@ -7,7 +7,20 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # The window is the product, so every platform barlo claims to support has
+    # to actually open one. macOS and Windows browser lookups were written from
+    # documented install locations and are otherwise never exercised.
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
 
@@ -23,27 +36,44 @@ jobs:
       - name: Check documentation
         run: bun run docs:check
 
-      # dist/ is committed so that installs from a GitHub URL need no build
-      # step: bun blocks lifecycle scripts by default and installs no
-      # devDependencies for git dependencies, so nothing can build it there.
-      # That only works while the committed output matches the source.
+      # Which browser findChrome picked, and from where. A Playwright path here
+      # means the runner had no system browser and the fallback below supplied
+      # one — the platform's real install locations went unexercised.
+      - name: Report the browser barlo found
+        id: browser
+        continue-on-error: true
+        run: bun -e "console.log((await import('./src/index.ts')).findChrome())"
+
+      - name: Install a browser if the runner has none
+        if: steps.browser.outcome == 'failure'
+        run: bunx playwright install chromium
+
+      # Linux runners have no display; macOS and Windows have a desktop session.
+      - name: Test
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test
+          else
+            bun test
+          fi
+
+      # Source-consistency checks, identical on every platform, so once is
+      # enough. dist/ is committed because installs from a GitHub URL cannot
+      # build it — bun blocks lifecycle scripts and installs no
+      # devDependencies for git dependencies.
       - name: Declarations are up to date
+        if: runner.os == 'Linux'
         run: |
           bun run build
           git diff --exit-code -- dist \
             || { echo "::error::dist/ is stale — run 'bun run build' and commit the result"; exit 1; }
 
-      # The suite opens real Chrome windows, so it needs a display. Chrome is
-      # preinstalled on ubuntu-latest at /usr/bin/google-chrome, which
-      # findChrome picks up without configuration.
-      - name: Test
-        run: xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test
-
       - name: Verify the published package
+        if: runner.os == 'Linux'
         run: |
           npm pack --pack-destination /tmp
-          echo '{"name":"consumer","type":"module","private":true}' > /tmp/consumer-package.json
-          mkdir -p /tmp/consumer && mv /tmp/consumer-package.json /tmp/consumer/package.json
+          mkdir -p /tmp/consumer
+          echo '{"name":"consumer","type":"module","private":true}' > /tmp/consumer/package.json
           cd /tmp/consumer && bun add /tmp/barlo-*.tgz
           test -f node_modules/barlo/dist/index.d.ts
           test -f node_modules/barlo/src/index.ts

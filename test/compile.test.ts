@@ -8,7 +8,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const REPO = join(import.meta.dir, '..')
+// Forward slashes so the generated import specifier is valid on Windows too.
+const REPO = join(import.meta.dir, '..').replaceAll('\\', '/')
 
 test('a compiled binary serves embedded assets and answers exposed calls', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'barlo-compile-'))
@@ -30,12 +31,16 @@ test('a compiled binary serves embedded assets and answers exposed calls', async
      process.exit(0)`,
   )
 
+  // bun appends .exe on Windows, so the path to run is not the one passed in.
+  const outfile = join(dir, 'app-bin')
+  const binary = process.platform === 'win32' ? `${outfile}.exe` : outfile
+
   const build = Bun.spawnSync([process.execPath, 'build', '--compile', join(dir, 'app.ts'),
-    '--outfile', join(dir, 'app-bin')])
+    '--outfile', outfile])
   expect(build.exitCode, build.stderr.toString()).toBe(0)
 
   // Run somewhere the source tree is not reachable, so nothing can fall back to disk.
-  const run = Bun.spawnSync([join(dir, 'app-bin')], { cwd: tmpdir(), env: process.env })
+  const run = Bun.spawnSync([binary], { cwd: tmpdir(), env: process.env })
   const stdout = run.stdout.toString()
   const line = stdout.split('\n').find(l => l.startsWith('{'))
   expect(line, `stdout: ${stdout}\nstderr: ${run.stderr.toString()}`).toBeTruthy()
