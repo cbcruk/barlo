@@ -140,6 +140,13 @@ Avoid it by wrapping the page's script so it declares nothing globally, using
 `<script type="module">`, whose top-level declarations are module-scoped, or exposing under a name
 the page does not declare — `__kill` rather than `kill`.
 
+#### The bridge belongs to the window, not the page
+
+Exposed functions are installed per window, so a window that navigates away
+takes them with it. `load()` therefore refuses a target outside the
+application's origin — otherwise a path from somewhere untrusted could point the
+window at a remote site and hand it every exposed function.
+
 ### Windows
 
 `app.mainWindow()`, `app.windows()`, `app.createWindow(uri?)`, and on a `Window`:

@@ -334,6 +334,58 @@ describe('failures are values', () => {
   }, 60_000)
 })
 
+describe('inputs that used to escape as exceptions', () => {
+  test('an exposed function returning a cyclic value rejects the page, not hangs it', async () => {
+    const cyclic: Record<string, unknown> = { a: 1 }
+    cyclic['self'] = cyclic
+    await app.exposeFunction('cyclic', () => cyclic)
+    await app.load('index.html')
+
+    // The page has to settle. Before, JSON.stringify threw while building the
+    // reply and the promise was left pending forever.
+    const outcome = must(
+      await app.evaluate<string>('cyclic().then(() => "resolved", e => "rejected: " + e.message)'),
+    )
+    expect(outcome).toContain('rejected:')
+    expect(outcome).toContain('could not send the result back')
+  })
+
+  test('a cyclic argument to evaluate is an error, not a throw', async () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic['self'] = cyclic
+
+    const result = await app.evaluate((x: unknown) => x, cyclic)
+    expect(result.isErr()).toBe(true)
+    if (result.isErr()) expect(result.error._tag).toBe('EvaluationError')
+  })
+
+  test('cyclic CDP params are an error, not a throw', async () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic['self'] = cyclic
+
+    const sent = await must(app.mainWindow()).session.send('Runtime.evaluate', cyclic)
+    expect(sent.isErr()).toBe(true)
+    if (sent.isErr()) expect(sent.error._tag).toBe('ProtocolError')
+  })
+
+  test('load refuses to leave the application origin', async () => {
+    // The bridge is installed per window, not per document, so a window that
+    // navigates away takes the exposed functions with it.
+    const before = must(await app.evaluate<string>('location.origin'))
+
+    const result = await app.load('http://example.com/evil')
+    expect(result.isErr()).toBe(true)
+    if (result.isErr()) expect(result.error._tag).toBe('NavigationError')
+    expect(must(await app.evaluate<string>('location.origin'))).toBe(before)
+  })
+
+  test('a relative path with odd characters still loads', async () => {
+    // Refusing off-origin must not refuse the ordinary.
+    expect((await app.load('index.html', { q: 'a b&c' })).isOk()).toBe(true)
+    expect(must(await app.evaluate<string>('location.search'))).toContain('a+b%26c')
+  })
+})
+
 describe('the protocol layer', () => {
   test('a refused CDP command comes back as ProtocolError naming the method', async () => {
     const sent = await must(app.mainWindow()).session.send('NoSuch.method')

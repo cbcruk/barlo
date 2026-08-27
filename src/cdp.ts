@@ -217,18 +217,45 @@ export class CDPConnection {
 
     // Every rejection path is turned into an Err here, so no caller above this
     // has to guard a CDP call with try/catch.
+    // Encoding and the socket write both throw — unserializable params, a
+    // socket already going down — and both used to reject out of a method whose
+    // whole contract is that it does not.
+    const encoded = Result.try({
+      try: () => JSON.stringify(message),
+      catch: (cause) =>
+        new ProtocolError({
+          method,
+          message: cause instanceof Error ? cause.message : String(cause),
+        }),
+    })
+    if (encoded.isErr()) return Promise.resolve(encoded)
+
     return new Promise(resolve => {
       this.#pending.set(id, {
         method,
         succeed: value => resolve(Result.ok(value)),
         fail: error => resolve(Result.err(error)),
       })
-      this.#socket.send(JSON.stringify(message))
+      const written = Result.try({
+        try: () => this.#socket.send(encoded.unwrap()),
+        catch: (cause) =>
+          new BrowserGoneError({
+            message: `${method}: ${cause instanceof Error ? cause.message : String(cause)}`,
+          }),
+      })
+      if (written.isErr()) {
+        this.#pending.delete(id)
+        resolve(written)
+      }
     })
   }
 
   #dispatch(raw: string): void {
-    const message = JSON.parse(raw)
+    // Chrome should never send us anything but JSON, and a socket event handler
+    // is no place to throw if it ever does.
+    const decoded = Result.try({ try: () => JSON.parse(raw), catch: () => undefined })
+    if (decoded.isErr()) return
+    const message = decoded.unwrap()
     if (message.id !== undefined) {
       const pending = this.#pending.get(message.id)
       if (!pending) return

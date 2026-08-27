@@ -205,10 +205,16 @@ export class Window {
    * Resolves once the page's `load` event has fired, so the document is ready
    * for {@linkcode Window.evaluate} on return.
    *
+   * The path must stay on the origin. An absolute URL would replace it, and
+   * because {@linkcode App.exposeFunction} installs into the window rather than
+   * the document, navigating away would hand those functions to whatever loaded
+   * next — so an off-origin target is refused rather than followed.
+   *
    * @param uri A path such as `"index.html"`, relative to the origin. A
    * leading slash is tolerated. Defaults to the origin root.
    * @param params Query parameters to append.
-   * @returns Nothing on success, or why the navigation did not complete.
+   * @returns Nothing on success, or {@linkcode NavigationError} when the page
+   * did not load or the target was off-origin.
    *
    * @example Passing state into the page
    * ```ts
@@ -223,6 +229,18 @@ export class Window {
   async load(uri = '', params?: Record<string, string>): Promise<Result<void, LoadError>> {
     const url = new URL(uri.replace(/^\//, ''), `${this.#origin}/`)
     for (const [key, value] of Object.entries(params ?? {})) url.searchParams.set(key, value)
+
+    if (!url.href.startsWith(`${this.#origin}/`)) {
+      return Result.err(
+        new NavigationError({
+          url: url.href,
+          message:
+            `${uri} resolves outside the application's origin. load() takes a path ` +
+            `relative to it, and the exposed functions are installed in this window — ` +
+            `navigating away would hand them to another origin.`,
+        }),
+      )
+    }
 
     const guarded = this.#guard('Page.navigate')
     if (guarded.isErr()) return guarded
@@ -347,10 +365,20 @@ export class Window {
     script: string | ((...args: any[]) => T),
     ...args: unknown[]
   ): Promise<Result<T, EvaluateError>> {
-    const expression =
-      typeof script === 'function'
-        ? `(${script.toString()})(${args.map(arg => JSON.stringify(arg ?? null)).join(', ')})`
-        : script
+    const built = Result.try({
+      try: () =>
+        typeof script === 'function'
+          ? `(${script.toString()})(${args.map(arg => JSON.stringify(arg ?? null)).join(', ')})`
+          : script,
+      catch: (cause) =>
+        new EvaluationError({
+          message: `arguments could not be serialized: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+        }),
+    })
+    if (built.isErr()) return built
+    const expression = built.unwrap()
 
     const guarded = this.#guard('Runtime.evaluate')
     if (guarded.isErr()) return guarded
@@ -405,7 +433,18 @@ export class Window {
       format: options.format ?? 'png',
       ...(options.quality !== undefined ? { quality: options.quality } : {}),
     })
-    return shot.map(({ data }) => Uint8Array.from(atob(data), c => c.charCodeAt(0)))
+    return shot.andThen(({ data }) =>
+      Result.try({
+        try: () => Uint8Array.from(atob(data), c => c.charCodeAt(0)),
+        catch: (cause) =>
+          new ProtocolError({
+            method: 'Page.captureScreenshot',
+            message: `could not decode the image: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+          }),
+      }),
+    )
   }
 
   /**

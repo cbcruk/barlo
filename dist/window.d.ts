@@ -78,10 +78,16 @@ export declare class Window {
      * Resolves once the page's `load` event has fired, so the document is ready
      * for {@linkcode Window.evaluate} on return.
      *
+     * The path must stay on the origin. An absolute URL would replace it, and
+     * because {@linkcode App.exposeFunction} installs into the window rather than
+     * the document, navigating away would hand those functions to whatever loaded
+     * next — so an off-origin target is refused rather than followed.
+     *
      * @param uri A path such as `"index.html"`, relative to the origin. A
      * leading slash is tolerated. Defaults to the origin root.
      * @param params Query parameters to append.
-     * @returns Nothing on success, or why the navigation did not complete.
+     * @returns Nothing on success, or {@linkcode NavigationError} when the page
+     * did not load or the target was off-origin.
      *
      * @example Passing state into the page
      * ```ts

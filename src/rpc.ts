@@ -10,6 +10,8 @@
  * @module
  */
 
+import { Result } from 'better-result'
+
 /**
  * Name of the CDP binding installed with `Runtime.addBinding`.
  *
@@ -113,7 +115,19 @@ export function bootstrapSource(names: Iterable<string>): string {
  */
 export function resolverExpression(id: number, ok: boolean, value: unknown): string {
   const payload = ok ? value : String((value as Error)?.message ?? value)
-  return `${RESOLVER}(${id}, ${ok}, ${JSON.stringify(payload ?? null)})`
+
+  // A value that will not serialize — anything cyclic, most obviously — used to
+  // throw here, leaving the page's promise unsettled forever. Rejecting it with
+  // the reason is the one outcome that is never a hang.
+  const encoded = Result.try({
+    try: () => JSON.stringify(payload ?? null),
+    catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+  })
+  if (encoded.isErr()) {
+    const reason = `barlo could not send the result back: ${encoded.error}`
+    return `${RESOLVER}(${id}, false, ${JSON.stringify(reason)})`
+  }
+  return `${RESOLVER}(${id}, ${ok}, ${encoded.unwrap()})`
 }
 
 /**
