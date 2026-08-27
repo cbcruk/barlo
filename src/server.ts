@@ -37,6 +37,20 @@ interface Route {
   handle: RequestHandler
 }
 
+/**
+ * The request's decoded pathname, or `undefined` when it cannot be decoded.
+ *
+ * `decodeURIComponent` throws on malformed percent-encoding — `/%ZZ` is enough
+ * — and a path barlo cannot decode is one it cannot be serving, so the route
+ * declines rather than taking the response down with it.
+ */
+function decodedPath(request: Request): string | undefined {
+  return Result.try({
+    try: () => decodeURIComponent(new URL(request.url).pathname),
+    catch: () => undefined,
+  }).unwrapOr(undefined)
+}
+
 function normalizePrefix(prefix: string): string {
   const trimmed = prefix.replace(/^\/+|\/+$/g, '')
   return trimmed ? `/${trimmed}/` : '/'
@@ -47,8 +61,8 @@ function folderHandler(folder: string, prefix: string): RequestHandler {
   const root = resolve(folder)
 
   return async request => {
-    const pathname = decodeURIComponent(new URL(request.url).pathname)
-    if (!pathname.startsWith(prefix)) return undefined
+    const pathname = decodedPath(request)
+    if (pathname === undefined || !pathname.startsWith(prefix)) return undefined
 
     const relative = pathname.slice(prefix.length) || 'index.html'
     const target = resolve(root, normalize(relative))
@@ -62,7 +76,9 @@ function folderHandler(folder: string, prefix: string): RequestHandler {
 
     for (const candidate of candidates) {
       const file = Bun.file(candidate)
-      if (await file.exists()) return new Response(file)
+      // An unreadable file is one this route cannot serve, same as a missing one.
+      const exists = (await Result.tryPromise(() => file.exists())).unwrapOr(false)
+      if (exists) return new Response(file)
     }
     return undefined
   }
@@ -75,13 +91,22 @@ function originHandler(base: string, prefix: string): RequestHandler {
     if (!url.pathname.startsWith(prefix)) return undefined
 
     const upstream = new URL(url.pathname.slice(prefix.length) + url.search, base)
-    const response = await fetch(upstream, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-      // @ts-expect-error -- Bun supports duplex for streaming request bodies
-      duplex: 'half',
-    })
+
+    // An upstream that is not listening is the ordinary case here — the app
+    // usually starts before the dev server it proxies — so a refused connection
+    // declines like a 5xx does rather than failing the request.
+    const proxied = await Result.tryPromise(() =>
+      fetch(upstream, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        // @ts-expect-error -- Bun supports duplex for streaming request bodies
+        duplex: 'half',
+      }),
+    )
+    if (proxied.isErr()) return undefined
+
+    const response = proxied.unwrap()
     return response.ok || response.status < 500 ? response : undefined
   }
 }
@@ -117,8 +142,8 @@ function embeddedHandler(files: EmbeddedFiles, prefix: string): RequestHandler {
   )
 
   return request => {
-    const pathname = decodeURIComponent(new URL(request.url).pathname)
-    if (!pathname.startsWith(prefix)) return undefined
+    const pathname = decodedPath(request)
+    if (pathname === undefined || !pathname.startsWith(prefix)) return undefined
 
     const key = pathname.slice(prefix.length) || 'index.html'
     const body = table.get(key) ?? table.get(`${key}/index.html`.replace(/^\//, ''))
@@ -163,8 +188,9 @@ export class AppServer {
    * Reverse-proxies a prefix onto a remote origin.
    *
    * Useful for pointing a window at a running dev server so hot reload keeps
-   * working. Upstream responses of 500 and above are treated as a failure and
-   * fall through to the next route.
+   * working. Upstream responses of 500 and above fall through to the next
+   * route, and so does an upstream that cannot be reached at all — starting the
+   * app before its dev server is ordinary rather than an error.
    *
    * @param base The origin to proxy to, such as `"http://localhost:5173"`.
    * @param prefix URL prefix to mount it under.
@@ -217,6 +243,9 @@ export class AppServer {
    *
    * Mounted at the root, so it sits behind every prefixed route.
    *
+   * A handler that throws is a bug rather than a decline, so it answers 500 and
+   * logs, instead of letting the exception reach the window as an error page.
+   *
    * @param handler Called with the request; return `undefined` to decline.
    *
    * @example Adding a JSON endpoint
@@ -262,7 +291,21 @@ export class AppServer {
           })
 
         for (const route of ordered()) {
-          const response = await route.handle(request)
+          const handled = await Result.tryPromise({
+            try: async () => route.handle(request),
+            catch: (cause) => cause,
+          })
+          if (handled.isErr()) {
+            // A handler that throws is a bug in the handler, not a decline.
+            // Saying so beats Bun's default error page, which puts a stack
+            // trace in the window.
+            console.error(
+              `barlo: the handler for ${route.prefix} threw on ${request.url}:`,
+              handled.error,
+            )
+            return new Response('Internal error', { status: 500 })
+          }
+          const response = handled.unwrap()
           if (response) return response
         }
         return new Response('Not found', { status: 404 })
@@ -292,7 +335,9 @@ export class AppServer {
    * serving them again on a new port. Idempotent.
    */
   stop(): void {
-    this.#server?.stop(true)
+    // Nothing useful follows a server that will not stop; it is going away.
+    const server = this.#server
+    if (server) Result.try({ try: () => server.stop(true), catch: () => undefined })
     this.#server = undefined
   }
 }

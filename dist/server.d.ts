@@ -61,8 +61,9 @@ export declare class AppServer {
      * Reverse-proxies a prefix onto a remote origin.
      *
      * Useful for pointing a window at a running dev server so hot reload keeps
-     * working. Upstream responses of 500 and above are treated as a failure and
-     * fall through to the next route.
+     * working. Upstream responses of 500 and above fall through to the next
+     * route, and so does an upstream that cannot be reached at all — starting the
+     * app before its dev server is ordinary rather than an error.
      *
      * @param base The origin to proxy to, such as `"http://localhost:5173"`.
      * @param prefix URL prefix to mount it under.
@@ -106,6 +107,9 @@ export declare class AppServer {
      * Registers a handler for any request the other routes decline.
      *
      * Mounted at the root, so it sits behind every prefixed route.
+     *
+     * A handler that throws is a bug rather than a decline, so it answers 500 and
+     * logs, instead of letting the exception reach the window as an error page.
      *
      * @param handler Called with the request; return `undefined` to decline.
      *

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type { Result } from 'better-result'
 
 import { ChromeNotFoundError, ProtocolError, launch, type App, type Window } from '../src/index'
+import { AppServer } from '../src/server'
 
 /**
  * Unwraps a Result in a test, failing with the tagged error rather than a
@@ -128,6 +129,56 @@ describe('serving', () => {
 
   test('refuses paths escaping the served folder', async () => {
     expect(must(await app.evaluate<number>('fetch("/../../etc/passwd").then(r => r.status)'))).toBe(404)
+  })
+})
+
+describe('serving failures', () => {
+  // Each of these used to reach the window as Bun's default error page. They
+  // exercise AppServer directly: the behaviour is the server's, and a browser
+  // per case would only add Chrome instances the suite does not need.
+  test('a path that cannot be decoded is declined, not fatal', async () => {
+    expect(must(await app.evaluate<number>('fetch("/%ZZ").then(r => r.status)'))).toBe(404)
+  })
+
+  test('an upstream that is not listening falls through', async () => {
+    const server = new AppServer()
+    // Nothing listens on port 1, which is the ordinary case for a dev-server
+    // proxy started before its dev server.
+    server.serveOrigin('http://127.0.0.1:1', '/proxy')
+    const origin = server.listen()
+    try {
+      expect((await fetch(`${origin}/proxy/x`)).status).toBe(404)
+    } finally {
+      server.stop()
+    }
+  })
+
+  test('a handler that throws answers 500 rather than an error page', async () => {
+    const server = new AppServer()
+    server.serveHandler(() => {
+      throw new Error('handler bug')
+    })
+    const origin = server.listen()
+    try {
+      const response = await fetch(origin)
+      expect(response.status).toBe(500)
+      // Bun's default page is HTML with a stack trace in it.
+      expect(await response.text()).toBe('Internal error')
+    } finally {
+      server.stop()
+    }
+  })
+
+  test('a malformed path reaches no route at all', async () => {
+    const server = new AppServer()
+    server.serveEmbedded({ 'index.html': 'hello' })
+    const origin = server.listen()
+    try {
+      expect((await fetch(`${origin}/%ZZ`)).status).toBe(404)
+      expect((await fetch(`${origin}/`)).status).toBe(200)
+    } finally {
+      server.stop()
+    }
   })
 })
 
