@@ -103,8 +103,14 @@ async function readEndpoint(
 
   while (Date.now() < deadline) {
     if (existsSync(portFile)) {
-      const [port, path] = readFileSync(portFile, 'utf8').split('\n')
-      if (port && path) return Result.ok(`ws://127.0.0.1:${port}${path}`)
+      try {
+        const [port, path] = readFileSync(portFile, 'utf8').split('\n')
+        if (port && path) return Result.ok(`ws://127.0.0.1:${port}${path}`)
+      } catch {
+        // Windows locks the file while Chrome is writing it, so the read
+        // between "it exists" and "it is finished" fails with EBUSY. That is
+        // the same not-ready-yet as a missing file, so keep polling.
+      }
     }
     await Bun.sleep(50)
   }
