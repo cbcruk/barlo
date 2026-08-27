@@ -124,24 +124,29 @@ export class Window {
    *
    * Does nothing once the window is closed.
    */
-  async syncBridge(): Promise<void> {
-    if (this.#closed) return
+  async syncBridge(): Promise<Result<void, WindowError>> {
+    if (this.#closed) return this.#guard('syncBridge')
     if (this.#bootstrapId) {
-      await this.session
-        .send('Page.removeScriptToEvaluateOnNewDocument', { identifier: this.#bootstrapId })
-        .catch(() => {})
+      // Best effort: a stale document script is harmless next to failing the
+      // install of the new one.
+      await this.session.send('Page.removeScriptToEvaluateOnNewDocument', {
+        identifier: this.#bootstrapId,
+      })
     }
     const source = bootstrapSource(this.#exposed.keys())
-    const { identifier } = await this.session.send<{ identifier: string }>(
+    const added = await this.session.send<{ identifier: string }>(
       'Page.addScriptToEvaluateOnNewDocument',
       { source },
     )
-    this.#bootstrapId = identifier
+    if (added.isErr()) return added.map(() => undefined)
+    this.#bootstrapId = added.unwrap().identifier
 
     // The document script only reaches *future* documents. Adopting a window
     // that already navigated, or exposing a function after load, needs the
-    // bootstrap run against the current document too.
-    await this.session.send('Runtime.evaluate', { expression: source }).catch(() => {})
+    // bootstrap run against the current document too — and if that fails the
+    // page has no bridge at all, which is worth saying rather than swallowing.
+    const installed = await this.session.send('Runtime.evaluate', { expression: source })
+    return installed.map(() => undefined)
   }
 
   async #onBindingCalled(payload: string): Promise<void> {
@@ -163,9 +168,17 @@ export class Window {
       value = error
     }
 
-    await this.session
-      .send('Runtime.evaluate', { expression: resolverExpression(call.id, ok, value) })
-      .catch(() => {})
+    // If the reply never lands, the page's promise never settles — a hang with
+    // no error anywhere. Nothing here can fix that, but it can say so.
+    const replied = await this.session.send('Runtime.evaluate', {
+      expression: resolverExpression(call.id, ok, value),
+    })
+    if (replied.isErr() && !this.#closed) {
+      console.warn(
+        `barlo: could not deliver the result of ${call.name}() to the page ` +
+          `(${replied.error.message}), so its promise will never settle.`,
+      )
+    }
   }
 
   /**
@@ -174,18 +187,13 @@ export class Window {
    * Every public operation goes through here, so "the window is gone" and
    * "Chrome rejected the command" stay distinguishable at the call site.
    */
-  #call<T>(method: string, run: () => Promise<T>): Promise<Result<T, WindowError>> {
-    if (this.#closed) {
-      return Promise.resolve(
-        Result.err(new WindowClosedError({ message: `${method}: the window is closed` })),
-      )
-    }
-    return Result.tryPromise({
-      try: run,
-      catch: (cause) =>
-        new ProtocolError({ method, message: cause instanceof Error ? cause.message : String(cause) }),
-    })
+  #guard(method: string): Result<void, WindowClosedError> {
+    return this.#closed
+      ? Result.err(new WindowClosedError({ message: `${method}: the window is closed` }))
+      : Result.ok()
   }
+
+
 
   /**
    * Navigates to a path relative to the application's origin.
@@ -212,26 +220,30 @@ export class Window {
     const url = new URL(uri.replace(/^\//, ''), `${this.#origin}/`)
     for (const [key, value] of Object.entries(params ?? {})) url.searchParams.set(key, value)
 
-    const navigated = await this.#call('Page.navigate', async () => {
+    const guarded = this.#guard('Page.navigate')
+    if (guarded.isErr()) return guarded
+
+    const { session } = this
+    const navigated = await Result.gen(async function* () {
       const loaded = new Promise<void>(resolve => {
-        const off = this.session.on('Page.loadEventFired', () => {
+        const off = session.on('Page.loadEventFired', () => {
           off()
           resolve()
         })
       })
       // Chrome reports a refused navigation in the command result rather than by
-      // rejecting, and then no load event ever arrives.
-      const result = await this.session.send<{ errorText?: string }>('Page.navigate', {
-        url: url.href,
-      })
-      if (result.errorText) throw new Error(result.errorText)
-      await loaded
-    })
-    if (navigated.isErr()) {
-      return navigated.mapError(e =>
-        ProtocolError.is(e) ? new NavigationError({ url: url.href, message: e.message }) : e,
+      // rejecting, and then no load event ever arrives — so this has to be read
+      // out of a successful command.
+      const result = yield* Result.await(
+        session.send<{ errorText?: string }>('Page.navigate', { url: url.href }),
       )
-    }
+      if (result.errorText) {
+        return Result.err(new NavigationError({ url: url.href, message: result.errorText }))
+      }
+      await loaded
+      return Result.ok()
+    })
+    if (navigated.isErr()) return navigated
 
     await this.#applyTitle()
     return Result.ok()
@@ -251,7 +263,8 @@ export class Window {
    * not declare. barlo warns about this automatically after each load; this
    * method is for asserting on it in tests.
    *
-   * @returns The shadowed names, empty when the bridge is intact.
+   * @returns The shadowed names, empty when the bridge is intact, or why the
+   * page could not be asked.
    *
    * @example Guarding the bridge in a test
    * ```ts
@@ -260,16 +273,18 @@ export class Window {
    * const app = (await launch()).unwrap();
    *
    * await app.load("index.html");
-   * console.assert((await app.mainWindow().unwrap().shadowedFunctions()).length === 0);
+   * const shadowed = (await app.mainWindow().unwrap().shadowedFunctions()).unwrapOr([]);
+   * console.assert(shadowed.length === 0);
    * ```
    */
-  async shadowedFunctions(): Promise<string[]> {
-    if (this.#closed) return []
-    return (await this.evaluate<string[]>(shadowedExpression())).unwrapOr([])
+  async shadowedFunctions(): Promise<Result<string[], EvaluateError>> {
+    const guarded = this.#guard('shadowedFunctions')
+    if (guarded.isErr()) return guarded
+    return this.evaluate<string[]>(shadowedExpression())
   }
 
   async #warnAboutShadowing(): Promise<void> {
-    const shadowed = await this.shadowedFunctions()
+    const shadowed = (await this.shadowedFunctions()).unwrapOr([])
     if (shadowed.length === 0) return
     console.warn(
       `barlo: the page replaced ${shadowed.map(n => `window.${n}`).join(', ')}, so calls ` +
@@ -281,9 +296,11 @@ export class Window {
 
   async #applyTitle(): Promise<void> {
     if (!this.#title) return
-    await this.session
-      .send('Runtime.evaluate', { expression: `document.title = ${JSON.stringify(this.#title)}` })
-      .catch(() => {})
+    // Cosmetic, and it races a window being closed, so a failure is not worth
+    // propagating out of load().
+    await this.session.send('Runtime.evaluate', {
+      expression: `document.title = ${JSON.stringify(this.#title)}`,
+    })
   }
 
   /**
@@ -331,15 +348,16 @@ export class Window {
         ? `(${script.toString()})(${args.map(arg => JSON.stringify(arg ?? null)).join(', ')})`
         : script
 
-    const sent = await this.#call('Runtime.evaluate', () =>
-      this.session.send<any>('Runtime.evaluate', {
-        expression,
-        awaitPromise: true,
-        returnByValue: true,
-        userGesture: true,
-      }),
-    )
-    if (sent.isErr()) return sent as Result<T, EvaluateError>
+    const guarded = this.#guard('Runtime.evaluate')
+    if (guarded.isErr()) return guarded
+
+    const sent = await this.session.send<any>('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true,
+    })
+    if (sent.isErr()) return sent
 
     // A page-side throw is a successful command carrying an exception, not a
     // protocol failure, so it gets a tag of its own.
@@ -376,12 +394,13 @@ export class Window {
   async screenshot(
     options: { format?: 'png' | 'jpeg' | 'webp'; quality?: number } = {},
   ): Promise<Result<Uint8Array, WindowError>> {
-    const shot = await this.#call('Page.captureScreenshot', () =>
-      this.session.send<{ data: string }>('Page.captureScreenshot', {
-        format: options.format ?? 'png',
-        ...(options.quality !== undefined ? { quality: options.quality } : {}),
-      }),
-    )
+    const guarded = this.#guard('Page.captureScreenshot')
+    if (guarded.isErr()) return guarded
+
+    const shot = await this.session.send<{ data: string }>('Page.captureScreenshot', {
+      format: options.format ?? 'png',
+      ...(options.quality !== undefined ? { quality: options.quality } : {}),
+    })
     return shot.map(({ data }) => Uint8Array.from(atob(data), c => c.charCodeAt(0)))
   }
 
@@ -391,9 +410,12 @@ export class Window {
    * @returns The bounds, with every field populated, plus the window state.
    */
   async bounds(): Promise<Result<Required<Bounds> & { windowState: WindowState }, WindowError>> {
-    const got = await this.#call('Browser.getWindowForTarget', () =>
-      this.#browser.send<any>('Browser.getWindowForTarget', { targetId: this.targetId }),
-    )
+    const guarded = this.#guard('Browser.getWindowForTarget')
+    if (guarded.isErr()) return guarded
+
+    const got = await this.#browser.send<any>('Browser.getWindowForTarget', {
+      targetId: this.targetId,
+    })
     return got.map(r => r.bounds)
   }
 
@@ -421,27 +443,40 @@ export class Window {
    * ```
    */
   async setBounds(bounds: Bounds): Promise<Result<void, WindowError>> {
-    return this.#call('Browser.setWindowBounds', async () => {
-      const { windowId } = await this.#browser.send<any>('Browser.getWindowForTarget', {
-        targetId: this.targetId,
-      })
-      await this.#browser.send('Browser.setWindowBounds', { windowId, bounds })
+    const guarded = this.#guard('Browser.setWindowBounds')
+    if (guarded.isErr()) return guarded
+
+    const browser = this.#browser
+    const { targetId } = this
+    return Result.gen(async function* () {
+      const { windowId } = yield* Result.await(
+        browser.send<any>('Browser.getWindowForTarget', { targetId }),
+      )
+      yield* Result.await(browser.send('Browser.setWindowBounds', { windowId, bounds }))
+      return Result.ok()
     })
   }
 
-  #setState(windowState: WindowState): Promise<Result<void, WindowError>> {
-    return this.#call('Browser.setWindowBounds', async () => {
-      const { windowId } = await this.#browser.send<any>('Browser.getWindowForTarget', {
-        targetId: this.targetId,
-      })
+  async #setState(windowState: WindowState): Promise<Result<void, WindowError>> {
+    const guarded = this.#guard('Browser.setWindowBounds')
+    if (guarded.isErr()) return guarded
+
+    const browser = this.#browser
+    const { targetId } = this
+    return Result.gen(async function* () {
+      const { windowId } = yield* Result.await(
+        browser.send<any>('Browser.getWindowForTarget', { targetId }),
+      )
       // Chrome rejects a state change made directly from another non-normal state.
-      await this.#browser.send('Browser.setWindowBounds', {
-        windowId,
-        bounds: { windowState: 'normal' },
-      })
+      yield* Result.await(
+        browser.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } }),
+      )
       if (windowState !== 'normal') {
-        await this.#browser.send('Browser.setWindowBounds', { windowId, bounds: { windowState } })
+        yield* Result.await(
+          browser.send('Browser.setWindowBounds', { windowId, bounds: { windowState } }),
+        )
       }
+      return Result.ok()
     })
   }
 
@@ -455,8 +490,10 @@ export class Window {
   minimize = () => this.#setState('minimized')
 
   /** Raises the window above other windows and focuses it. */
-  bringToFront(): Promise<Result<void, WindowError>> {
-    return this.#call('Page.bringToFront', () => this.session.send('Page.bringToFront'))
+  async bringToFront(): Promise<Result<void, WindowError>> {
+    const guarded = this.#guard('Page.bringToFront')
+    if (guarded.isErr()) return guarded
+    return (await this.session.send('Page.bringToFront')).map(() => undefined)
   }
 
   /**
@@ -521,7 +558,9 @@ export class Window {
    */
   async close(): Promise<void> {
     if (this.#closed) return
-    await this.#browser.send('Target.closeTarget', { targetId: this.targetId }).catch(() => {})
+    // A target that refuses to close is one that is already gone, which is the
+    // outcome being asked for.
+    await this.#browser.send('Target.closeTarget', { targetId: this.targetId })
     this._markClosed()
   }
 }

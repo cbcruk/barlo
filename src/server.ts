@@ -272,6 +272,10 @@ export class AppServer {
   /**
    * The origin currently being served.
    *
+   * Only reachable after {@linkcode AppServer.listen}, which every {@linkcode App}
+   * calls during startup, so this is a programming error rather than a runtime
+   * failure and stays an exception.
+   *
    * @throws When the server is not listening.
    */
   get origin(): string {

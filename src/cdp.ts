@@ -11,11 +11,20 @@
  * @module
  */
 
+import { Result } from 'better-result'
+
+import { BrowserGoneError, ProtocolError } from './errors'
+
+/** What a CDP command can fail with. */
+export type SendError = ProtocolError | BrowserGoneError
+
 type Handler = (params: any) => void
 
 interface Pending {
+  /** Kept so a dropped connection can say which command it lost. */
+  method: string
   resolve: (value: any) => void
-  reject: (error: Error) => void
+  reject: (error: SendError) => void
 }
 
 /**
@@ -55,9 +64,9 @@ export class CDPSession {
    * @template T The shape of the command's result object.
    * @param method A domain-qualified method name, such as `"Page.navigate"`.
    * @param params The command's parameters. Must be JSON-serializable.
-   * @returns The command's `result` object.
-   * @throws When Chrome reports a protocol error, or when the connection
-   * closes while the command is in flight.
+   * @returns The command's `result` object, {@linkcode ProtocolError} when
+   * Chrome refuses it, or {@linkcode BrowserGoneError} when the connection
+   * closes while it is in flight.
    *
    * @example Reading the page title
    * ```ts
@@ -67,13 +76,17 @@ export class CDPSession {
    *
    * const session = app.mainWindow().unwrap().session;
    *
-   * const { result } = await session.send("Runtime.evaluate", {
+   * const sent = await session.send("Runtime.evaluate", {
    *   expression: "document.title",
    *   returnByValue: true,
    * });
+   * const title = sent.map((r) => r.result.value).unwrapOr("");
    * ```
    */
-  send<T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  send<T = any>(
+    method: string,
+    params: Record<string, unknown> = {},
+  ): Promise<Result<T, SendError>> {
     return this.#connection._send(method, params, this.sessionId)
   }
 
@@ -104,14 +117,15 @@ export class CDPSession {
    * target returns the same {@linkcode CDPSession}.
    *
    * @param targetId The target to attach to, from `Target.getTargets`.
-   * @returns A session whose commands and events belong to that target.
+   * @returns A session whose commands and events belong to that target, or why
+   * the attach failed.
    */
-  async attach(targetId: string): Promise<CDPSession> {
-    const { sessionId } = await this.send<{ sessionId: string }>('Target.attachToTarget', {
+  async attach(targetId: string): Promise<Result<CDPSession, SendError>> {
+    const attached = await this.send<{ sessionId: string }>('Target.attachToTarget', {
       targetId,
       flatten: true,
     })
-    return this.#connection._register(sessionId)
+    return attached.map(({ sessionId }) => this.#connection._register(sessionId))
   }
 }
 
@@ -174,13 +188,28 @@ export class CDPConnection {
   }
 
   /** @internal */
-  _send(method: string, params: Record<string, unknown>, sessionId?: string): Promise<any> {
-    if (this.#closed) return Promise.reject(new Error(`${method}: CDP connection is closed`))
+  _send(
+    method: string,
+    params: Record<string, unknown>,
+    sessionId?: string,
+  ): Promise<Result<any, SendError>> {
+    if (this.#closed) {
+      return Promise.resolve(
+        Result.err(new BrowserGoneError({ message: `${method}: the connection is closed` })),
+      )
+    }
     const id = ++this.#nextId
     const message: Record<string, unknown> = { id, method, params }
     if (sessionId) message.sessionId = sessionId
-    return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject })
+
+    // Every rejection path is turned into an Err here, so no caller above this
+    // has to guard a CDP call with try/catch.
+    return new Promise(resolve => {
+      this.#pending.set(id, {
+        method,
+        resolve: value => resolve(Result.ok(value)),
+        reject: error => resolve(Result.err(error)),
+      })
       this.#socket.send(JSON.stringify(message))
     })
   }
@@ -191,8 +220,16 @@ export class CDPConnection {
       const pending = this.#pending.get(message.id)
       if (!pending) return
       this.#pending.delete(message.id)
-      if (message.error) pending.reject(new Error(`${message.error.message} (${message.error.code})`))
-      else pending.resolve(message.result)
+      if (message.error) {
+        pending.reject(
+          new ProtocolError({
+            method: pending.method,
+            message: `${message.error.message} (${message.error.code})`,
+          }),
+        )
+      } else {
+        pending.resolve(message.result)
+      }
       return
     }
     if (!message.method) return
@@ -203,7 +240,9 @@ export class CDPConnection {
   #abort(error: Error): void {
     if (this.#closed) return
     this.#closed = true
-    for (const pending of this.#pending.values()) pending.reject(error)
+    for (const pending of this.#pending.values()) {
+      pending.reject(new BrowserGoneError({ message: `${pending.method}: ${error.message}` }))
+    }
     this.#pending.clear()
     this.browser._emit('__disconnected__', error)
   }

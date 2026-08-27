@@ -11,7 +11,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CDPConnection, type CDPSession } from './cdp'
+import { CDPConnection, type CDPSession, type SendError } from './cdp'
 import { findChrome } from './find-chrome'
 import { AppServer, BLANK_PATH, type EmbeddedFiles, type RequestHandler } from './server'
 import {
@@ -94,22 +94,27 @@ export interface LaunchOptions {
 
 const DEFAULT_TIMEOUT = 20_000
 
-async function readEndpoint(profile: string, timeout: number): Promise<string> {
+async function readEndpoint(
+  profile: string,
+  timeout: number,
+): Promise<Result<string, LaunchTimeoutError>> {
   const portFile = join(profile, 'DevToolsActivePort')
   const deadline = Date.now() + timeout
 
   while (Date.now() < deadline) {
     if (existsSync(portFile)) {
       const [port, path] = readFileSync(portFile, 'utf8').split('\n')
-      if (port && path) return `ws://127.0.0.1:${port}${path}`
+      if (port && path) return Result.ok(`ws://127.0.0.1:${port}${path}`)
     }
     await Bun.sleep(50)
   }
-  throw new LaunchTimeoutError({
-    phase: 'devtools-endpoint',
-    ms: timeout,
-    message: `Chrome did not publish a DevTools endpoint within ${timeout}ms`,
-  })
+  return Result.err(
+    new LaunchTimeoutError({
+      phase: 'devtools-endpoint',
+      ms: timeout,
+      message: `Chrome did not publish a DevTools endpoint within ${timeout}ms`,
+    }),
+  )
 }
 
 /**
@@ -230,6 +235,8 @@ export class App {
    * global of that name, and can in turn be overwritten by one the page
    * declares.
    * @param fn The function to run in Bun. May be async.
+   * @returns Nothing once every open window can call it, or the first window
+   * that could not be reached.
    *
    * @example Reading a file for the page
    * ```ts
@@ -242,9 +249,17 @@ export class App {
    *
    * The page calls `await window.readFile("notes.md")`.
    */
-  async exposeFunction(name: string, fn: ExposedFunction): Promise<void> {
+  async exposeFunction(name: string, fn: ExposedFunction): Promise<Result<void, WindowError>> {
     this.#exposed.set(name, fn)
-    await Promise.all(this.#windows.filter(w => !w.closed).map(w => w.syncBridge()))
+    // With no windows left there is nothing to install into and none coming, so
+    // reporting success here would be a lie the caller acts on.
+    if (this.#exited) {
+      return Result.err(new BrowserGoneError({ message: `${name}: the app has exited` }))
+    }
+    const synced = await Promise.all(this.#windows.filter(w => !w.closed).map(w => w.syncBridge()))
+    // Every window has to end up with the name, so the first failure is the
+    // answer — a bridge installed in only some windows is worse than an error.
+    return Result.all(synced).map(() => undefined)
   }
 
   /**
@@ -254,22 +269,23 @@ export class App {
    */
   async _start(): Promise<Result<App, LaunchError>> {
     const started = await Result.tryPromise({
+      // #startup reports its own failures; tryPromise is only here for the
+      // handshake and the sync filesystem calls, which still reject.
       try: () => this.#startup(),
-      catch: (cause): LaunchError => {
-        // Never leave a stray Chrome or a listening socket behind.
-        this.exit()
-        if (LaunchTimeoutError.is(cause) || ChromeNotFoundError.is(cause)) return cause
-        return new BrowserGoneError({
+      catch: (cause): LaunchError =>
+        new BrowserGoneError({
           message: cause instanceof Error ? cause.message : String(cause),
-        })
-      },
+        }),
     })
-    return started.map(() => this)
+
+    const outcome = Result.flatten(started)
+    if (outcome.isErr()) this.exit() // never leave a stray Chrome or a socket behind
+    return outcome.map(() => this)
   }
 
-  async #startup(): Promise<void> {
+  async #startup(): Promise<Result<void, LaunchError | SendError>> {
     const chrome = findChrome(this.#options.executablePath)
-    if (chrome.isErr()) throw chrome.error
+    if (chrome.isErr()) return chrome
     this.#executable = chrome.unwrap()
 
     if (this.#options.userDataDir) {
@@ -288,15 +304,25 @@ export class App {
     })
 
     const endpoint = await readEndpoint(this.#profile, this.#options.timeout ?? DEFAULT_TIMEOUT)
-    this.#connection = await CDPConnection.connect(endpoint)
+    if (endpoint.isErr()) return endpoint
+
+    // CDPConnection.connect is the one step that still rejects: it owns the
+    // WebSocket handshake, which has no Result to hand back yet.
+    this.#connection = await CDPConnection.connect(endpoint.unwrap())
     this.#browser = this.#connection.browser
     this.#browser.on('__disconnected__', () => this.#onChromeExit())
 
-    await this.#browser.send('Target.setDiscoverTargets', { discover: true })
+    const discovering = await this.#browser.send('Target.setDiscoverTargets', { discover: true })
+    if (discovering.isErr()) return discovering
     this.#browser.on('Target.targetDestroyed', ({ targetId }) => this.#onTargetDestroyed(targetId))
 
     const targetId = await this.#waitForPageTarget()
-    this.#windows.push(await this.#adopt(targetId))
+    if (targetId.isErr()) return targetId
+
+    const adopted = await this.#adopt(targetId.unwrap())
+    if (adopted.isErr()) return adopted
+    this.#windows.push(adopted.unwrap())
+    return Result.ok()
   }
 
   #chromeArgs(origin: string): string[] {
@@ -316,23 +342,32 @@ export class App {
     return [...flags, ...args]
   }
 
-  async #waitForPageTarget(known = new Set<string>()): Promise<string> {
+  async #waitForPageTarget(
+    known = new Set<string>(),
+  ): Promise<Result<string, LaunchTimeoutError | SendError>> {
     const deadline = Date.now() + (this.#options.timeout ?? DEFAULT_TIMEOUT)
     while (Date.now() < deadline) {
-      const { targetInfos } = await this.#browser!.send<any>('Target.getTargets')
-      const page = targetInfos.find((t: any) => t.type === 'page' && !known.has(t.targetId))
-      if (page) return page.targetId
+      const targets = await this.#browser!.send<any>('Target.getTargets')
+      if (targets.isErr()) return targets
+      const page = targets
+        .unwrap()
+        .targetInfos.find((t: any) => t.type === 'page' && !known.has(t.targetId))
+      if (page) return Result.ok(page.targetId as string)
       await Bun.sleep(50)
     }
-    throw new LaunchTimeoutError({
-      phase: 'window',
-      ms: this.#options.timeout ?? DEFAULT_TIMEOUT,
-      message: 'Chrome did not open an app window',
-    })
+    return Result.err(
+      new LaunchTimeoutError({
+        phase: 'window',
+        ms: this.#options.timeout ?? DEFAULT_TIMEOUT,
+        message: 'Chrome did not open an app window',
+      }),
+    )
   }
 
-  async #adopt(targetId: string): Promise<Window> {
-    const session = await this.#browser!.attach(targetId)
+  async #adopt(targetId: string): Promise<Result<Window, SendError>> {
+    const attached = await this.#browser!.attach(targetId)
+    if (attached.isErr()) return attached
+    const session = attached.unwrap()
     const window = new Window(
       session,
       this.#browser!,
@@ -342,7 +377,7 @@ export class App {
       this.#options.title,
     )
     await window._initialize()
-    return window
+    return Result.ok(window)
   }
 
   /**
@@ -379,20 +414,12 @@ export class App {
     spawn([this.#executable, `--app=${url.href}`, `--user-data-dir=${this.#profile}`,
       `--window-size=${width},${height}`], { stdout: 'ignore', stderr: 'ignore' })
 
-    return Result.tryPromise({
-      try: async () => {
-        const targetId = await this.#waitForPageTarget(known)
-        const window = await this.#adopt(targetId)
-        this.#windows.push(window)
-        return window
-      },
-      catch: (cause): LaunchError =>
-        LaunchTimeoutError.is(cause)
-          ? cause
-          : new BrowserGoneError({
-              message: cause instanceof Error ? cause.message : String(cause),
-            }),
-    })
+    const targetId = await this.#waitForPageTarget(known)
+    if (targetId.isErr()) return targetId
+
+    const adopted = await this.#adopt(targetId.unwrap())
+    if (adopted.isOk()) this.#windows.push(adopted.unwrap())
+    return adopted
   }
 
   /**

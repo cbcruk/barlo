@@ -109,12 +109,15 @@ launched.match({
       ChromeNotFoundError: () => console.error('Install Google Chrome.'),
       LaunchTimeoutError: t => console.error(`Chrome stalled at ${t.phase}.`),
       BrowserGoneError: () => console.error('Chrome exited during startup.'),
+      ProtocolError: e => console.error(`Chrome refused ${e.method}.`),
     }),
 })
 ```
 
 `match` over the error union is exhaustive, so a new failure mode becomes a compile error at every
-call site rather than a surprise at runtime. Narrow with `_tag`, `ChromeNotFoundError.is(e)`, or
+call site rather than a surprise at runtime. This goes all the way down: `window.session.send()`,
+the raw CDP escape hatch, returns a `Result` too, so nothing in barlo throws and nothing swallows a
+failure to keep a signature tidy. Narrow with `_tag`, `ChromeNotFoundError.is(e)`, or
 `match`; `unwrap()` when a failure genuinely should stop the program, `unwrapOr(fallback)` when it
 should not.
 

@@ -71,7 +71,7 @@ export declare class Window {
      *
      * Does nothing once the window is closed.
      */
-    syncBridge(): Promise<void>;
+    syncBridge(): Promise<Result<void, WindowError>>;
     /**
      * Navigates to a path relative to the application's origin.
      *
@@ -108,7 +108,8 @@ export declare class Window {
      * not declare. barlo warns about this automatically after each load; this
      * method is for asserting on it in tests.
      *
-     * @returns The shadowed names, empty when the bridge is intact.
+     * @returns The shadowed names, empty when the bridge is intact, or why the
+     * page could not be asked.
      *
      * @example Guarding the bridge in a test
      * ```ts
@@ -117,10 +118,11 @@ export declare class Window {
      * const app = (await launch()).unwrap();
      *
      * await app.load("index.html");
-     * console.assert((await app.mainWindow().unwrap().shadowedFunctions()).length === 0);
+     * const shadowed = (await app.mainWindow().unwrap().shadowedFunctions()).unwrapOr([]);
+     * console.assert(shadowed.length === 0);
      * ```
      */
-    shadowedFunctions(): Promise<string[]>;
+    shadowedFunctions(): Promise<Result<string[], EvaluateError>>;
     /**
      * Runs code in the page and returns its result.
      *

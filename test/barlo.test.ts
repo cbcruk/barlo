@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import type { Result } from 'better-result'
 
-import { ChromeNotFoundError, launch, type App, type Window } from '../src/index'
+import { ChromeNotFoundError, ProtocolError, launch, type App, type Window } from '../src/index'
 
 /**
  * Unwraps a Result in a test, failing with the tagged error rather than a
@@ -152,26 +152,26 @@ describe('shadowing', () => {
   // the exposed `kill` and the button called the page back instead of Bun.
   test('reports an exposed name the page declares over', async () => {
     await app.load('shadow.html')
-    expect(await must(app.mainWindow()).shadowedFunctions()).toEqual(['add'])
+    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual(['add'])
     // The page really did take it over, which is what makes this silent.
     expect(must(await app.evaluate<string>('add(1, 2)'))).toBe('page')
   })
 
   test('stays quiet when the page wraps its script', async () => {
     await app.load('wrapped.html')
-    expect(await must(app.mainWindow()).shadowedFunctions()).toEqual([])
+    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual([])
     expect(must(await app.evaluate<number>('add(1, 2)'))).toBe(3)
   })
 
   test('stays quiet for a module script, whose declarations are scoped', async () => {
     await app.load('module.html')
-    expect(await must(app.mainWindow()).shadowedFunctions()).toEqual([])
+    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual([])
     expect(must(await app.evaluate<number>('add(1, 2)'))).toBe(3)
   })
 
   test('a reload reinstalls the bridge over the page', async () => {
     await app.load('index.html')
-    expect(await must(app.mainWindow()).shadowedFunctions()).toEqual([])
+    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual([])
   })
 })
 
@@ -267,9 +267,41 @@ describe('failures are values', () => {
           ChromeNotFoundError: () => 'no browser',
           LaunchTimeoutError: () => 'timed out',
           BrowserGoneError: () => 'browser gone',
+          ProtocolError: () => 'chrome refused a command',
         }),
     })
     expect(described).toBe('no browser')
+  }, 60_000)
+})
+
+describe('the protocol layer', () => {
+  test('a refused CDP command comes back as ProtocolError naming the method', async () => {
+    const sent = await must(app.mainWindow()).session.send('NoSuch.method')
+    expect(sent.isErr()).toBe(true)
+    if (sent.isErr() && ProtocolError.is(sent.error)) {
+      expect(sent.error.method).toBe('NoSuch.method')
+    } else {
+      throw new Error('expected a ProtocolError')
+    }
+  })
+
+  test('a command on a dead connection comes back as BrowserGoneError', async () => {
+    const solo = must(await launch({ width: 400, height: 300 }))
+    const session = must(solo.mainWindow()).session
+    solo.exit()
+
+    const sent = await session.send('Runtime.evaluate', { expression: '1' })
+    expect(sent.isErr()).toBe(true)
+    if (sent.isErr()) expect(sent.error._tag).toBe('BrowserGoneError')
+  }, 60_000)
+
+  test('exposeFunction reports a window it could not reach', async () => {
+    const solo = must(await launch({ width: 400, height: 300 }))
+    solo.exit()
+
+    const exposed = await solo.exposeFunction('late', () => 1)
+    expect(exposed.isErr()).toBe(true)
+    if (exposed.isErr()) expect(exposed.error._tag).toBe('BrowserGoneError')
   }, 60_000)
 })
 

@@ -10,6 +10,10 @@
  *
  * @module
  */
+import { Result } from 'better-result';
+import { BrowserGoneError, ProtocolError } from './errors';
+/** What a CDP command can fail with. */
+export type SendError = ProtocolError | BrowserGoneError;
 type Handler = (params: any) => void;
 /**
  * A CDP command and event scope: either the browser itself or one attached
@@ -42,9 +46,9 @@ export declare class CDPSession {
      * @template T The shape of the command's result object.
      * @param method A domain-qualified method name, such as `"Page.navigate"`.
      * @param params The command's parameters. Must be JSON-serializable.
-     * @returns The command's `result` object.
-     * @throws When Chrome reports a protocol error, or when the connection
-     * closes while the command is in flight.
+     * @returns The command's `result` object, {@linkcode ProtocolError} when
+     * Chrome refuses it, or {@linkcode BrowserGoneError} when the connection
+     * closes while it is in flight.
      *
      * @example Reading the page title
      * ```ts
@@ -54,13 +58,14 @@ export declare class CDPSession {
      *
      * const session = app.mainWindow().unwrap().session;
      *
-     * const { result } = await session.send("Runtime.evaluate", {
+     * const sent = await session.send("Runtime.evaluate", {
      *   expression: "document.title",
      *   returnByValue: true,
      * });
+     * const title = sent.map((r) => r.result.value).unwrapOr("");
      * ```
      */
-    send<T = any>(method: string, params?: Record<string, unknown>): Promise<T>;
+    send<T = any>(method: string, params?: Record<string, unknown>): Promise<Result<T, SendError>>;
     /**
      * Subscribes to a CDP event on this session.
      *
@@ -79,9 +84,10 @@ export declare class CDPSession {
      * target returns the same {@linkcode CDPSession}.
      *
      * @param targetId The target to attach to, from `Target.getTargets`.
-     * @returns A session whose commands and events belong to that target.
+     * @returns A session whose commands and events belong to that target, or why
+     * the attach failed.
      */
-    attach(targetId: string): Promise<CDPSession>;
+    attach(targetId: string): Promise<Result<CDPSession, SendError>>;
 }
 /**
  * A live WebSocket connection to Chrome's DevTools endpoint.
@@ -114,7 +120,7 @@ export declare class CDPConnection {
     /** @internal */
     _register(sessionId: string): CDPSession;
     /** @internal */
-    _send(method: string, params: Record<string, unknown>, sessionId?: string): Promise<any>;
+    _send(method: string, params: Record<string, unknown>, sessionId?: string): Promise<Result<any, SendError>>;
     /** Whether the socket has closed, by request or because Chrome exited. */
     get closed(): boolean;
     /**

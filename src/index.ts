@@ -96,6 +96,7 @@ export { findChrome } from './find-chrome'
  *       ChromeNotFoundError: () => console.error("Install Google Chrome."),
  *       LaunchTimeoutError: (t) => console.error(`Chrome stalled at ${t.phase}.`),
  *       BrowserGoneError: () => console.error("Chrome exited during startup."),
+ *        ProtocolError: (e) => console.error(`Chrome refused ${e.method}.`),
  *     }),
  * });
  * ```

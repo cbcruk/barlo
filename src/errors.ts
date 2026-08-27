@@ -107,8 +107,17 @@ export type BarloError =
   | EvaluationError
   | ProtocolError
 
-/** What {@linkcode launch} can fail with. */
-export type LaunchError = ChromeNotFoundError | LaunchTimeoutError | BrowserGoneError
+/**
+ * What {@linkcode launch} can fail with.
+ *
+ * `ProtocolError` is in here because startup talks to Chrome before handing the
+ * app over — a refused command during those first exchanges fails the launch.
+ */
+export type LaunchError =
+  | ChromeNotFoundError
+  | LaunchTimeoutError
+  | BrowserGoneError
+  | ProtocolError
 
 /** What any operation on a window can fail with, before its own failures. */
 export type WindowError = WindowClosedError | BrowserGoneError | ProtocolError

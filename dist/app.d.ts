@@ -155,6 +155,8 @@ export declare class App {
      * global of that name, and can in turn be overwritten by one the page
      * declares.
      * @param fn The function to run in Bun. May be async.
+     * @returns Nothing once every open window can call it, or the first window
+     * that could not be reached.
      *
      * @example Reading a file for the page
      * ```ts
@@ -167,7 +169,7 @@ export declare class App {
      *
      * The page calls `await window.readFile("notes.md")`.
      */
-    exposeFunction(name: string, fn: ExposedFunction): Promise<void>;
+    exposeFunction(name: string, fn: ExposedFunction): Promise<Result<void, WindowError>>;
     /**
      * Starts Chrome and opens the first window, cleaning up on failure.
      *
