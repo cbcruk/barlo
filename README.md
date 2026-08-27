@@ -150,9 +150,9 @@ window, sizing, folder/embedded/handler serving, the RPC bridge across reloads a
 multi-window, and the compiled binary.
 
 The window frame is the one thing that is genuinely platform-specific: `outerHeight - innerHeight` is
-0-11 pixels on Linux, 32 on macOS, and 39 on Windows. And on macOS the height given to `setBounds` is
-the OS window height, which counts a title bar the page does not see, so `window.outerHeight` reads
-about 23 pixels short — use `window.bounds()` when the exact number matters.
+0-11 pixels on Linux, 32 on macOS, and 39 on Windows. And on macOS the height given to `setBounds` does not
+round-trip: a window set to 700 comes back as 677 from both `window.bounds()` and the page, short by
+the title bar. Width is exact everywhere, as is height on Linux and Windows.
 
 Chrome's `--app` mode is the load-bearing assumption here, exactly as it was for Carlo. Google has
 been narrowing that surface for years, and if it goes, this approach goes with it.

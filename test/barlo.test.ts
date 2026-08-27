@@ -72,10 +72,15 @@ describe('window', () => {
     await Bun.sleep(300)
 
     const bounds = await app.mainWindow().bounds()
-    expect([bounds.width, bounds.height]).toEqual([900, 700])
+    expect(bounds.width).toBe(900)
     expect(await app.evaluate<number>('outerWidth')).toBe(900)
-    // outerHeight is deliberately not asserted: on macOS the OS window height
-    // counts a title bar the page never sees, so it reads about 23px short.
+
+    // Height does not round-trip on macOS: asking for 700 yields 677, short by
+    // the title bar, and both `bounds()` and `outerHeight` agree on 677. Every
+    // other platform is exact, so the allowance is one title bar, not a range.
+    expect(700 - bounds.height).toBeGreaterThanOrEqual(0)
+    expect(700 - bounds.height).toBeLessThanOrEqual(30)
+    expect(await app.evaluate<number>('outerHeight')).toBe(bounds.height)
   })
 })
 

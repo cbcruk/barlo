@@ -191,10 +191,11 @@ export declare class Window {
      * Omitted fields are left unchanged. Has no visible effect while the window
      * is maximized or fullscreen.
      *
-     * Sizes are OS window sizes, which are not always what the page sees. On
-     * macOS the height counts a title bar the page is not given, so a window set
-     * to 700 reports an `outerHeight` of about 677. {@linkcode Window.bounds} is
-     * the value to compare against, not `window.outerHeight`.
+     * Height does not round-trip on macOS: a window set to 700 comes back as 677,
+     * short by the title bar, from both {@linkcode Window.bounds} and the page's
+     * `window.outerHeight`. Add the title bar yourself if an exact height
+     * matters there. Width is exact everywhere, as is height on Linux and
+     * Windows.
      *
      * @param bounds The position and size fields to change.
      *
