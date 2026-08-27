@@ -143,10 +143,16 @@ browser already on the machine.
 
 ## Status and caveats
 
-Verified on Linux/arm64 against Chromium 151 under Xvfb: app-mode window with no browser UI,
-requested sizing, folder/embedded/handler serving, the RPC bridge across reloads and windows,
-resizing, multi-window, and the compiled binary. macOS and Windows paths are implemented from the
-documented install locations but are **not yet exercised on those platforms**.
+CI opens a real window on Linux, macOS, and Windows on every push, and each runner resolves its own
+system browser — `/Applications/Google Chrome.app/...` on macOS,
+`C:\Program Files\Google\Chrome\Application\chrome.exe` on Windows. The suite covers the app-mode
+window, sizing, folder/embedded/handler serving, the RPC bridge across reloads and windows,
+multi-window, and the compiled binary.
+
+The window frame is the one thing that is genuinely platform-specific: `outerHeight - innerHeight` is
+0-11 pixels on Linux, 32 on macOS, and 39 on Windows. And on macOS the height given to `setBounds` is
+the OS window height, which counts a title bar the page does not see, so `window.outerHeight` reads
+about 23 pixels short — use `window.bounds()` when the exact number matters.
 
 Chrome's `--app` mode is the load-bearing assumption here, exactly as it was for Carlo. Google has
 been narrowing that surface for years, and if it goes, this approach goes with it.

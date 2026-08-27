@@ -22,6 +22,16 @@ writeFileSync(
   `<!doctype html><script type="module">async function add() { return 'page' }</script>`,
 )
 
+/**
+ * Frame allowance for an app-mode window, in pixels.
+ *
+ * The frame is platform-specific — measured at 0-11 on Linux, 32 on macOS, and
+ * 39 on Windows — so this cannot assert zero. A tabbed window spends about 87
+ * pixels more on the toolbar, so anything under this means the toolbar is gone,
+ * which is the property under test.
+ */
+const MAX_APP_CHROME = 60
+
 let app: App
 
 beforeAll(async () => {
@@ -46,9 +56,7 @@ describe('window', () => {
   })
 
   test('runs in app mode with no browser chrome', async () => {
-    // A tabbed window spends ~87px on the toolbar; an app window only loses
-    // a few pixels of frame, which varies by platform and window manager.
-    expect(await app.evaluate<number>('outerHeight - innerHeight')).toBeLessThan(30)
+    expect(await app.evaluate<number>('outerHeight - innerHeight')).toBeLessThan(MAX_APP_CHROME)
   })
 
   test('honours the requested size', async () => {
@@ -62,8 +70,12 @@ describe('window', () => {
   test('resizes via bounds', async () => {
     await app.mainWindow().setBounds({ width: 900, height: 700 })
     await Bun.sleep(300)
-    expect(await app.evaluate<string>('[outerWidth, outerHeight].join("x")')).toBe('900x700')
-    expect((await app.mainWindow().bounds()).width).toBe(900)
+
+    const bounds = await app.mainWindow().bounds()
+    expect([bounds.width, bounds.height]).toEqual([900, 700])
+    expect(await app.evaluate<number>('outerWidth')).toBe(900)
+    // outerHeight is deliberately not asserted: on macOS the OS window height
+    // counts a title bar the page never sees, so it reads about 23px short.
   })
 })
 
@@ -151,7 +163,7 @@ describe('multiple windows', () => {
       expect(app.windows().length).toBe(2)
       expect(await second.evaluate<string>('document.getElementById("n").textContent')).toBe('nested')
       expect(await second.evaluate<number>('add(4, 5)')).toBe(9)
-      expect(await second.evaluate<number>('outerHeight - innerHeight')).toBeLessThan(30)
+      expect(await second.evaluate<number>('outerHeight - innerHeight')).toBeLessThan(MAX_APP_CHROME)
       // The main window is untouched.
       expect(await app.evaluate<string>('document.getElementById("t").textContent')).toBe('hello')
     } finally {

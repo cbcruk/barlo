@@ -340,6 +340,11 @@ export class Window {
    * Omitted fields are left unchanged. Has no visible effect while the window
    * is maximized or fullscreen.
    *
+   * Sizes are OS window sizes, which are not always what the page sees. On
+   * macOS the height counts a title bar the page is not given, so a window set
+   * to 700 reports an `outerHeight` of about 677. {@linkcode Window.bounds} is
+   * the value to compare against, not `window.outerHeight`.
+   *
    * @param bounds The position and size fields to change.
    *
    * @example Centring a window

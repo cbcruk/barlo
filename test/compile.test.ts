@@ -25,7 +25,7 @@ test('a compiled binary serves embedded assets and answers exposed calls', async
      console.log(JSON.stringify({
        text: await app.evaluate('document.getElementById("t").textContent'),
        rpc: await app.evaluate('mul(6, 7)'),
-       chromeless: await app.evaluate('outerHeight - innerHeight') < 30,
+       chromeless: await app.evaluate('outerHeight - innerHeight') < 60,
      }))
      app.exit()
      process.exit(0)`,
