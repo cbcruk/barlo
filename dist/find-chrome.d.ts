@@ -6,6 +6,8 @@
  *
  * @module
  */
+import { Result } from 'better-result';
+import { ChromeNotFoundError } from './errors';
 /**
  * Returns the path to a usable Chrome binary.
  *
@@ -26,20 +28,18 @@
  * @param explicitPath A Chrome binary to use instead of searching. Usually
  * {@linkcode LaunchOptions.executablePath} passed through by
  * {@linkcode launch}.
- * @returns An absolute path to a browser executable that exists on disk.
- * @throws When the explicit path or environment variable points at a file that
- * does not exist, or when the search finds no browser.
+ * @returns The absolute path to a browser executable that exists on disk, or
+ * {@linkcode ChromeNotFoundError} listing what was checked.
  *
  * @example Checking for a browser before launching
  * ```ts
  * import { findChrome } from "barlo";
  *
- * try {
- *   console.log(`Using ${findChrome()}`);
- * } catch {
- *   console.error("Install Google Chrome to run this app.");
- * }
+ * findChrome().match({
+ *   ok: (path) => console.log(`Using ${path}`),
+ *   err: (e) => console.error(e.message),
+ * });
  * ```
  */
-export declare function findChrome(explicitPath?: string): string;
+export declare function findChrome(explicitPath?: string): Result<string, ChromeNotFoundError>;
 //# sourceMappingURL=find-chrome.d.ts.map

@@ -3,7 +3,9 @@
  *
  * @module
  */
+import { Result } from 'better-result';
 import type { CDPSession } from './cdp';
+import { type EvaluateError, type LoadError, type WindowError } from './errors';
 /**
  * A window's position and size in screen pixels.
  *
@@ -79,18 +81,19 @@ export declare class Window {
      * @param uri A path such as `"index.html"`, relative to the origin. A
      * leading slash is tolerated. Defaults to the origin root.
      * @param params Query parameters to append.
+     * @returns Nothing on success, or why the navigation did not complete.
      *
      * @example Passing state into the page
      * ```ts
      * import { launch } from "barlo";
      *
-     * const app = await launch();
+     * const app = (await launch()).unwrap();
      *
      * app.serveFolder("./www");
-     * await app.mainWindow().load("editor.html", { file: "notes.md" });
+     * await app.mainWindow().unwrap().load("editor.html", { file: "notes.md" });
      * ```
      */
-    load(uri?: string, params?: Record<string, string>): Promise<void>;
+    load(uri?: string, params?: Record<string, string>): Promise<Result<void, LoadError>>;
     /**
      * Lists exposed functions the loaded page has replaced with its own globals.
      *
@@ -111,10 +114,10 @@ export declare class Window {
      * ```ts
      * import { launch } from "barlo";
      *
-     * const app = await launch();
+     * const app = (await launch()).unwrap();
      *
      * await app.load("index.html");
-     * console.assert((await app.mainWindow().shadowedFunctions()).length === 0);
+     * console.assert((await app.mainWindow().unwrap().shadowedFunctions()).length === 0);
      * ```
      */
     shadowedFunctions(): Promise<string[]>;
@@ -133,28 +136,28 @@ export declare class Window {
      * @param script A function to call in the page, or an expression to evaluate.
      * @param args Arguments for `script` when it is a function. Serialized to
      * JSON, so they must not contain functions or cycles.
-     * @returns The value the code produced.
-     * @throws When the code throws in the page, carrying the page-side message.
+     * @returns The value the code produced, or {@linkcode EvaluationError}
+     * carrying the page-side message when the code threw.
      *
      * @example Reading from the DOM
      * ```ts
      * import { launch } from "barlo";
-   *
-   * const app = await launch();
-   *
-     * const title = await app.evaluate<string>("document.title");
+     *
+     * const app = (await launch()).unwrap();
+     *
+     * const title = (await app.evaluate<string>("document.title")).unwrapOr("");
      * ```
      *
      * @example Calling a function with arguments
      * ```ts
      * import { launch } from "barlo";
-   *
-   * const app = await launch();
-   *
-     * const sum = await app.evaluate((a: number, b: number) => a + b, 2, 3);
+     *
+     * const app = (await launch()).unwrap();
+     *
+     * const sum = (await app.evaluate((a: number, b: number) => a + b, 2, 3)).unwrap();
      * ```
      */
-    evaluate<T = unknown>(script: string | ((...args: any[]) => T), ...args: unknown[]): Promise<T>;
+    evaluate<T = unknown>(script: string | ((...args: any[]) => T), ...args: unknown[]): Promise<Result<T, EvaluateError>>;
     /**
      * Captures the window's viewport as an image.
      *
@@ -167,24 +170,24 @@ export declare class Window {
      * @example Saving a screenshot
      * ```ts
      * import { launch } from "barlo";
-   *
-   * const app = await launch();
-   *
-     * await Bun.write("shot.png", await app.screenshot());
+     *
+     * const app = (await launch()).unwrap();
+     *
+     * await Bun.write("shot.png", (await app.screenshot()).unwrap());
      * ```
      */
     screenshot(options?: {
         format?: 'png' | 'jpeg' | 'webp';
         quality?: number;
-    }): Promise<Uint8Array>;
+    }): Promise<Result<Uint8Array, WindowError>>;
     /**
      * Reads the window's current position, size, and state.
      *
      * @returns The bounds, with every field populated, plus the window state.
      */
-    bounds(): Promise<Required<Bounds> & {
+    bounds(): Promise<Result<Required<Bounds> & {
         windowState: WindowState;
-    }>;
+    }, WindowError>>;
     /**
      * Moves or resizes the window.
      *
@@ -202,21 +205,21 @@ export declare class Window {
      * @example Centring a window
      * ```ts
      * import { launch } from "barlo";
-   *
-   * const app = await launch();
-   *
-     * await app.mainWindow().setBounds({ left: 200, top: 120, width: 900, height: 700 });
+     *
+     * const app = (await launch()).unwrap();
+     *
+     * await app.mainWindow().unwrap().setBounds({ left: 200, top: 120, width: 900, height: 700 });
      * ```
      */
-    setBounds(bounds: Bounds): Promise<void>;
+    setBounds(bounds: Bounds): Promise<Result<void, WindowError>>;
     /** Puts the window into fullscreen. */
-    fullscreen: () => Promise<void>;
+    fullscreen: () => Promise<Result<void, WindowError>>;
     /** Maximizes the window. */
-    maximize: () => Promise<void>;
+    maximize: () => Promise<Result<void, WindowError>>;
     /** Minimizes the window. */
-    minimize: () => Promise<void>;
+    minimize: () => Promise<Result<void, WindowError>>;
     /** Raises the window above other windows and focuses it. */
-    bringToFront(): Promise<void>;
+    bringToFront(): Promise<Result<void, WindowError>>;
     /**
      * Registers a handler for the window closing.
      *
@@ -246,10 +249,10 @@ export declare class Window {
      * ```ts
      * import { launch } from "barlo";
      *
-     * const app = await launch();
+     * const app = (await launch()).unwrap();
      *
      * {
-     *   await using preferences = await app.createWindow("preferences.html");
+     *   await using preferences = (await app.createWindow("preferences.html")).unwrap();
      *
      *   await preferences.evaluate("document.title");
      * }

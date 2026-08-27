@@ -18,14 +18,14 @@ test('a compiled binary serves embedded assets and answers exposed calls', async
     join(dir, 'app.ts'),
     `import index from './index.html' with { type: 'text' }
      import { launch } from ${JSON.stringify(join(REPO, 'src/index.ts'))}
-     const app = await launch({ width: 480, height: 360 })
+     const app = (await launch({ width: 480, height: 360 })).unwrap()
      app.serveEmbedded({ 'index.html': index })
      await app.exposeFunction('mul', (a, b) => a * b)
      await app.load('index.html')
      console.log(JSON.stringify({
-       text: await app.evaluate('document.getElementById("t").textContent'),
-       rpc: await app.evaluate('mul(6, 7)'),
-       chromeless: await app.evaluate('outerHeight - innerHeight') < 60,
+       text: (await app.evaluate('document.getElementById("t").textContent')).unwrap(),
+       rpc: (await app.evaluate('mul(6, 7)')).unwrap(),
+       chromeless: (await app.evaluate('outerHeight - innerHeight')).unwrap() < 60,
      }))
      app.exit()
      process.exit(0)`,

@@ -1,1 +1,1 @@
-{"version":3,"file":"find-chrome.d.ts","sourceRoot":"","sources":["../src/find-chrome.ts"],"names":[],"mappings":"AAAA;;;;;;;GAOG;AAsEH;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;GAkCG;AACH,wBAAgB,UAAU,CAAC,YAAY,CAAC,EAAE,MAAM,GAAG,MAAM,CAqBxD"}
+{"version":3,"file":"find-chrome.d.ts","sourceRoot":"","sources":["../src/find-chrome.ts"],"names":[],"mappings":"AAAA;;;;;;;GAOG;AAEH,OAAO,EAAE,MAAM,EAAE,MAAM,eAAe,CAAA;AAKtC,OAAO,EAAE,mBAAmB,EAAE,MAAM,UAAU,CAAA;AAkE9C;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;GAgCG;AACH,wBAAgB,UAAU,CAAC,YAAY,CAAC,EAAE,MAAM,GAAG,MAAM,CAAC,MAAM,EAAE,mBAAmB,CAAC,CAgCrF"}

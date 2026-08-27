@@ -4,7 +4,18 @@
  * @module
  */
 
+import { Result } from 'better-result'
+
 import type { CDPSession } from './cdp'
+import {
+  EvaluationError,
+  NavigationError,
+  ProtocolError,
+  WindowClosedError,
+  type EvaluateError,
+  type LoadError,
+  type WindowError,
+} from './errors'
 import { BINDING, bootstrapSource, resolverExpression, shadowedExpression, type RpcCall } from './rpc'
 
 /**
@@ -158,6 +169,25 @@ export class Window {
   }
 
   /**
+   * Wraps a CDP call, tagging its failure and refusing a closed window.
+   *
+   * Every public operation goes through here, so "the window is gone" and
+   * "Chrome rejected the command" stay distinguishable at the call site.
+   */
+  #call<T>(method: string, run: () => Promise<T>): Promise<Result<T, WindowError>> {
+    if (this.#closed) {
+      return Promise.resolve(
+        Result.err(new WindowClosedError({ message: `${method}: the window is closed` })),
+      )
+    }
+    return Result.tryPromise({
+      try: run,
+      catch: (cause) =>
+        new ProtocolError({ method, message: cause instanceof Error ? cause.message : String(cause) }),
+    })
+  }
+
+  /**
    * Navigates to a path relative to the application's origin.
    *
    * Resolves once the page's `load` event has fired, so the document is ready
@@ -166,30 +196,45 @@ export class Window {
    * @param uri A path such as `"index.html"`, relative to the origin. A
    * leading slash is tolerated. Defaults to the origin root.
    * @param params Query parameters to append.
+   * @returns Nothing on success, or why the navigation did not complete.
    *
    * @example Passing state into the page
    * ```ts
    * import { launch } from "barlo";
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * app.serveFolder("./www");
-   * await app.mainWindow().load("editor.html", { file: "notes.md" });
+   * await app.mainWindow().unwrap().load("editor.html", { file: "notes.md" });
    * ```
    */
-  async load(uri = '', params?: Record<string, string>): Promise<void> {
+  async load(uri = '', params?: Record<string, string>): Promise<Result<void, LoadError>> {
     const url = new URL(uri.replace(/^\//, ''), `${this.#origin}/`)
     for (const [key, value] of Object.entries(params ?? {})) url.searchParams.set(key, value)
 
-    const loaded = new Promise<void>(resolve => {
-      const off = this.session.on('Page.loadEventFired', () => {
-        off()
-        resolve()
+    const navigated = await this.#call('Page.navigate', async () => {
+      const loaded = new Promise<void>(resolve => {
+        const off = this.session.on('Page.loadEventFired', () => {
+          off()
+          resolve()
+        })
       })
+      // Chrome reports a refused navigation in the command result rather than by
+      // rejecting, and then no load event ever arrives.
+      const result = await this.session.send<{ errorText?: string }>('Page.navigate', {
+        url: url.href,
+      })
+      if (result.errorText) throw new Error(result.errorText)
+      await loaded
     })
-    await this.session.send('Page.navigate', { url: url.href })
-    await loaded
+    if (navigated.isErr()) {
+      return navigated.mapError(e =>
+        ProtocolError.is(e) ? new NavigationError({ url: url.href, message: e.message }) : e,
+      )
+    }
+
     await this.#applyTitle()
+    return Result.ok()
   }
 
   /**
@@ -212,15 +257,15 @@ export class Window {
    * ```ts
    * import { launch } from "barlo";
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * await app.load("index.html");
-   * console.assert((await app.mainWindow().shadowedFunctions()).length === 0);
+   * console.assert((await app.mainWindow().unwrap().shadowedFunctions()).length === 0);
    * ```
    */
   async shadowedFunctions(): Promise<string[]> {
     if (this.#closed) return []
-    return this.evaluate<string[]>(shadowedExpression()).catch(() => [])
+    return (await this.evaluate<string[]>(shadowedExpression())).unwrapOr([])
   }
 
   async #warnAboutShadowing(): Promise<void> {
@@ -256,44 +301,58 @@ export class Window {
    * @param script A function to call in the page, or an expression to evaluate.
    * @param args Arguments for `script` when it is a function. Serialized to
    * JSON, so they must not contain functions or cycles.
-   * @returns The value the code produced.
-   * @throws When the code throws in the page, carrying the page-side message.
+   * @returns The value the code produced, or {@linkcode EvaluationError}
+   * carrying the page-side message when the code threw.
    *
    * @example Reading from the DOM
    * ```ts
    * import { launch } from "barlo";
- *
- * const app = await launch();
- *
-   * const title = await app.evaluate<string>("document.title");
+   *
+   * const app = (await launch()).unwrap();
+   *
+   * const title = (await app.evaluate<string>("document.title")).unwrapOr("");
    * ```
    *
    * @example Calling a function with arguments
    * ```ts
    * import { launch } from "barlo";
- *
- * const app = await launch();
- *
-   * const sum = await app.evaluate((a: number, b: number) => a + b, 2, 3);
+   *
+   * const app = (await launch()).unwrap();
+   *
+   * const sum = (await app.evaluate((a: number, b: number) => a + b, 2, 3)).unwrap();
    * ```
    */
-  async evaluate<T = unknown>(script: string | ((...args: any[]) => T), ...args: unknown[]): Promise<T> {
+  async evaluate<T = unknown>(
+    script: string | ((...args: any[]) => T),
+    ...args: unknown[]
+  ): Promise<Result<T, EvaluateError>> {
     const expression =
       typeof script === 'function'
         ? `(${script.toString()})(${args.map(arg => JSON.stringify(arg ?? null)).join(', ')})`
         : script
 
-    const result = await this.session.send<any>('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-      userGesture: true,
-    })
+    const sent = await this.#call('Runtime.evaluate', () =>
+      this.session.send<any>('Runtime.evaluate', {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+        userGesture: true,
+      }),
+    )
+    if (sent.isErr()) return sent as Result<T, EvaluateError>
+
+    // A page-side throw is a successful command carrying an exception, not a
+    // protocol failure, so it gets a tag of its own.
+    const result = sent.unwrap()
     if (result.exceptionDetails) {
       const details = result.exceptionDetails
-      throw new Error(details.exception?.description ?? details.text ?? 'Evaluation failed')
+      return Result.err(
+        new EvaluationError({
+          message: details.exception?.description ?? details.text ?? 'Evaluation failed',
+        }),
+      )
     }
-    return result.result.value as T
+    return Result.ok(result.result.value as T)
   }
 
   /**
@@ -308,18 +367,22 @@ export class Window {
    * @example Saving a screenshot
    * ```ts
    * import { launch } from "barlo";
- *
- * const app = await launch();
- *
-   * await Bun.write("shot.png", await app.screenshot());
+   *
+   * const app = (await launch()).unwrap();
+   *
+   * await Bun.write("shot.png", (await app.screenshot()).unwrap());
    * ```
    */
-  async screenshot(options: { format?: 'png' | 'jpeg' | 'webp'; quality?: number } = {}): Promise<Uint8Array> {
-    const { data } = await this.session.send<{ data: string }>('Page.captureScreenshot', {
-      format: options.format ?? 'png',
-      ...(options.quality !== undefined ? { quality: options.quality } : {}),
-    })
-    return Uint8Array.from(atob(data), c => c.charCodeAt(0))
+  async screenshot(
+    options: { format?: 'png' | 'jpeg' | 'webp'; quality?: number } = {},
+  ): Promise<Result<Uint8Array, WindowError>> {
+    const shot = await this.#call('Page.captureScreenshot', () =>
+      this.session.send<{ data: string }>('Page.captureScreenshot', {
+        format: options.format ?? 'png',
+        ...(options.quality !== undefined ? { quality: options.quality } : {}),
+      }),
+    )
+    return shot.map(({ data }) => Uint8Array.from(atob(data), c => c.charCodeAt(0)))
   }
 
   /**
@@ -327,11 +390,11 @@ export class Window {
    *
    * @returns The bounds, with every field populated, plus the window state.
    */
-  async bounds(): Promise<Required<Bounds> & { windowState: WindowState }> {
-    const { bounds } = await this.#browser.send<any>('Browser.getWindowForTarget', {
-      targetId: this.targetId,
-    })
-    return bounds
+  async bounds(): Promise<Result<Required<Bounds> & { windowState: WindowState }, WindowError>> {
+    const got = await this.#call('Browser.getWindowForTarget', () =>
+      this.#browser.send<any>('Browser.getWindowForTarget', { targetId: this.targetId }),
+    )
+    return got.map(r => r.bounds)
   }
 
   /**
@@ -351,27 +414,35 @@ export class Window {
    * @example Centring a window
    * ```ts
    * import { launch } from "barlo";
- *
- * const app = await launch();
- *
-   * await app.mainWindow().setBounds({ left: 200, top: 120, width: 900, height: 700 });
+   *
+   * const app = (await launch()).unwrap();
+   *
+   * await app.mainWindow().unwrap().setBounds({ left: 200, top: 120, width: 900, height: 700 });
    * ```
    */
-  async setBounds(bounds: Bounds): Promise<void> {
-    const { windowId } = await this.#browser.send<any>('Browser.getWindowForTarget', {
-      targetId: this.targetId,
+  async setBounds(bounds: Bounds): Promise<Result<void, WindowError>> {
+    return this.#call('Browser.setWindowBounds', async () => {
+      const { windowId } = await this.#browser.send<any>('Browser.getWindowForTarget', {
+        targetId: this.targetId,
+      })
+      await this.#browser.send('Browser.setWindowBounds', { windowId, bounds })
     })
-    await this.#browser.send('Browser.setWindowBounds', { windowId, bounds })
   }
 
-  async #setState(windowState: WindowState): Promise<void> {
-    const { windowId } = await this.#browser.send<any>('Browser.getWindowForTarget', {
-      targetId: this.targetId,
+  #setState(windowState: WindowState): Promise<Result<void, WindowError>> {
+    return this.#call('Browser.setWindowBounds', async () => {
+      const { windowId } = await this.#browser.send<any>('Browser.getWindowForTarget', {
+        targetId: this.targetId,
+      })
+      // Chrome rejects a state change made directly from another non-normal state.
+      await this.#browser.send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { windowState: 'normal' },
+      })
+      if (windowState !== 'normal') {
+        await this.#browser.send('Browser.setWindowBounds', { windowId, bounds: { windowState } })
+      }
     })
-    // Chrome rejects a state change made directly from another non-normal state.
-    await this.#browser.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } })
-    if (windowState !== 'normal')
-      await this.#browser.send('Browser.setWindowBounds', { windowId, bounds: { windowState } })
   }
 
   /** Puts the window into fullscreen. */
@@ -384,8 +455,8 @@ export class Window {
   minimize = () => this.#setState('minimized')
 
   /** Raises the window above other windows and focuses it. */
-  bringToFront(): Promise<void> {
-    return this.session.send('Page.bringToFront')
+  bringToFront(): Promise<Result<void, WindowError>> {
+    return this.#call('Page.bringToFront', () => this.session.send('Page.bringToFront'))
   }
 
   /**
@@ -429,10 +500,10 @@ export class Window {
    * ```ts
    * import { launch } from "barlo";
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * {
-   *   await using preferences = await app.createWindow("preferences.html");
+   *   await using preferences = (await app.createWindow("preferences.html")).unwrap();
    *
    *   await preferences.evaluate("document.title");
    * }

@@ -7,9 +7,12 @@
  * @module
  */
 
+import { Result } from 'better-result'
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+
+import { ChromeNotFoundError } from './errors'
 
 const DARWIN = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -95,26 +98,30 @@ function playwrightCandidates(): string[] {
  * @param explicitPath A Chrome binary to use instead of searching. Usually
  * {@linkcode LaunchOptions.executablePath} passed through by
  * {@linkcode launch}.
- * @returns An absolute path to a browser executable that exists on disk.
- * @throws When the explicit path or environment variable points at a file that
- * does not exist, or when the search finds no browser.
+ * @returns The absolute path to a browser executable that exists on disk, or
+ * {@linkcode ChromeNotFoundError} listing what was checked.
  *
  * @example Checking for a browser before launching
  * ```ts
  * import { findChrome } from "barlo";
  *
- * try {
- *   console.log(`Using ${findChrome()}`);
- * } catch {
- *   console.error("Install Google Chrome to run this app.");
- * }
+ * findChrome().match({
+ *   ok: (path) => console.log(`Using ${path}`),
+ *   err: (e) => console.error(e.message),
+ * });
  * ```
  */
-export function findChrome(explicitPath?: string): string {
+export function findChrome(explicitPath?: string): Result<string, ChromeNotFoundError> {
   const override = explicitPath ?? process.env['BARLO_CHROME_PATH'] ?? process.env['CHROME_PATH']
   if (override) {
-    if (!existsSync(override)) throw new Error(`Chrome not found at ${override}`)
-    return override
+    return existsSync(override)
+      ? Result.ok(override)
+      : Result.err(
+          new ChromeNotFoundError({
+            searched: [override],
+            message: `Chrome not found at ${override}`,
+          }),
+        )
   }
 
   const candidates =
@@ -124,11 +131,16 @@ export function findChrome(explicitPath?: string): string {
         ? windowsCandidates()
         : LINUX
 
-  const found = [...candidates, ...playwrightCandidates()].find(existsSync)
-  if (found) return found
+  const searched = [...candidates, ...playwrightCandidates()]
+  const found = searched.find(existsSync)
+  if (found) return Result.ok(found)
 
-  throw new Error(
-    'Could not find Chrome. Install Google Chrome, or point barlo at a binary ' +
-      'with the BARLO_CHROME_PATH environment variable.',
+  return Result.err(
+    new ChromeNotFoundError({
+      searched,
+      message:
+        'Could not find Chrome. Install Google Chrome, or point barlo at a binary ' +
+        'with the BARLO_CHROME_PATH environment variable.',
+    }),
   )
 }

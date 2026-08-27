@@ -1,6 +1,6 @@
 {
   "name": "barlo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Build desktop apps with Bun and the local Chrome. A port of GoogleChromeLabs/carlo.",
   "license": "Apache-2.0",
   "repository": {
@@ -51,5 +51,8 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "better-result": "^3.0.1"
   }
 }

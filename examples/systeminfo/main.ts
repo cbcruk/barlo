@@ -9,7 +9,13 @@ import indexHtmlBundle from './www/index.html' with { type: 'text' }
 
 const indexHtml = indexHtmlBundle as unknown as string
 
-const app = await launch({ title: 'System Info', width: 720, height: 520 })
+const launched = await launch({ title: 'System Info', width: 720, height: 520 })
+if (launched.isErr()) {
+  console.error(launched.error.message)
+  process.exit(1)
+}
+
+const app = launched.unwrap()
 
 app.serveEmbedded({ 'index.html': indexHtml })
 

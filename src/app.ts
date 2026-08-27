@@ -5,6 +5,7 @@
  * @module
  */
 
+import { Result } from 'better-result'
 import { spawn, type Subprocess } from 'bun'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,6 +14,16 @@ import { join } from 'node:path'
 import { CDPConnection, type CDPSession } from './cdp'
 import { findChrome } from './find-chrome'
 import { AppServer, BLANK_PATH, type EmbeddedFiles, type RequestHandler } from './server'
+import {
+  BrowserGoneError,
+  ChromeNotFoundError,
+  LaunchTimeoutError,
+  WindowClosedError,
+  type EvaluateError,
+  type LaunchError,
+  type LoadError,
+  type WindowError,
+} from './errors'
 import { Window, type ExposedFunction } from './window'
 
 /** Settings for {@linkcode launch}. */
@@ -94,7 +105,11 @@ async function readEndpoint(profile: string, timeout: number): Promise<string> {
     }
     await Bun.sleep(50)
   }
-  throw new Error(`Chrome did not publish a DevTools endpoint within ${timeout}ms`)
+  throw new LaunchTimeoutError({
+    phase: 'devtools-endpoint',
+    ms: timeout,
+    message: `Chrome did not publish a DevTools endpoint within ${timeout}ms`,
+  })
 }
 
 /**
@@ -170,7 +185,7 @@ export class App {
    * import { launch } from "barlo";
    * import index from "./www/index.html" with { type: "text" };
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * app.serveEmbedded({ "index.html": index as unknown as string });
    * await app.load("index.html");
@@ -220,7 +235,7 @@ export class App {
    * ```ts
    * import { launch } from "barlo";
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * await app.exposeFunction("readFile", (path: string) => Bun.file(path).text());
    * ```
@@ -237,20 +252,25 @@ export class App {
    *
    * @internal
    */
-  async _start(): Promise<void> {
-    try {
-      await this.#startup()
-    } catch (error) {
-      // Never leave a stray Chrome or a listening socket behind.
-      this.exit()
-      throw error instanceof Error
-        ? new Error(`barlo failed to launch: ${error.message}`, { cause: error })
-        : error
-    }
+  async _start(): Promise<Result<App, LaunchError>> {
+    const started = await Result.tryPromise({
+      try: () => this.#startup(),
+      catch: (cause): LaunchError => {
+        // Never leave a stray Chrome or a listening socket behind.
+        this.exit()
+        if (LaunchTimeoutError.is(cause) || ChromeNotFoundError.is(cause)) return cause
+        return new BrowserGoneError({
+          message: cause instanceof Error ? cause.message : String(cause),
+        })
+      },
+    })
+    return started.map(() => this)
   }
 
   async #startup(): Promise<void> {
-    this.#executable = findChrome(this.#options.executablePath)
+    const chrome = findChrome(this.#options.executablePath)
+    if (chrome.isErr()) throw chrome.error
+    this.#executable = chrome.unwrap()
 
     if (this.#options.userDataDir) {
       this.#profile = this.#options.userDataDir
@@ -304,7 +324,11 @@ export class App {
       if (page) return page.targetId
       await Bun.sleep(50)
     }
-    throw new Error('Chrome did not open an app window')
+    throw new LaunchTimeoutError({
+      phase: 'window',
+      ms: this.#options.timeout ?? DEFAULT_TIMEOUT,
+      message: 'Chrome did not open an app window',
+    })
   }
 
   async #adopt(targetId: string): Promise<Window> {
@@ -331,22 +355,22 @@ export class App {
    * @param uri A path relative to the origin for the new window to open.
    * Defaults to the origin root.
    * @returns The new window, already navigated and bridged.
-   * @throws When the app is not running, or when no new window appears within
-   * {@linkcode LaunchOptions.timeout} milliseconds.
    *
    * @example Opening a second window
    * ```ts
    * import { launch } from "barlo";
- *
- * const app = await launch();
- *
-   * const preferences = await app.createWindow("preferences.html");
+   *
+   * const app = (await launch()).unwrap();
+   *
+   * const preferences = (await app.createWindow("preferences.html")).unwrap();
    *
    * await preferences.setBounds({ width: 480, height: 320 });
    * ```
    */
-  async createWindow(uri = ''): Promise<Window> {
-    if (!this.#browser) throw new Error('App is not running')
+  async createWindow(uri = ''): Promise<Result<Window, LaunchError | WindowClosedError>> {
+    if (!this.#browser) {
+      return Result.err(new WindowClosedError({ message: 'the app is not running' }))
+    }
 
     const known = new Set(this.#windows.map(w => w.targetId))
     const url = new URL(uri.replace(/^\//, ''), `${this.#server.origin}/`)
@@ -355,10 +379,20 @@ export class App {
     spawn([this.#executable, `--app=${url.href}`, `--user-data-dir=${this.#profile}`,
       `--window-size=${width},${height}`], { stdout: 'ignore', stderr: 'ignore' })
 
-    const targetId = await this.#waitForPageTarget(known)
-    const window = await this.#adopt(targetId)
-    this.#windows.push(window)
-    return window
+    return Result.tryPromise({
+      try: async () => {
+        const targetId = await this.#waitForPageTarget(known)
+        const window = await this.#adopt(targetId)
+        this.#windows.push(window)
+        return window
+      },
+      catch: (cause): LaunchError =>
+        LaunchTimeoutError.is(cause)
+          ? cause
+          : new BrowserGoneError({
+              message: cause instanceof Error ? cause.message : String(cause),
+            }),
+    })
   }
 
   /**
@@ -368,13 +402,14 @@ export class App {
    * {@linkcode App.screenshot} are shorthands for calling the same method on
    * it.
    *
-   * @returns The oldest open window.
-   * @throws When every window has closed.
+   * @returns The oldest open window, or {@linkcode WindowClosedError} when
+   * every window has closed.
    */
-  mainWindow(): Window {
+  mainWindow(): Result<Window, WindowClosedError> {
     const window = this.#windows.find(w => !w.closed)
-    if (!window) throw new Error('App has no open windows')
     return window
+      ? Result.ok(window)
+      : Result.err(new WindowClosedError({ message: 'the app has no open windows' }))
   }
 
   /**
@@ -392,8 +427,9 @@ export class App {
    * @param uri A path relative to the origin. Defaults to the origin root.
    * @param params Query parameters to append.
    */
-  load(uri = '', params?: Record<string, string>): Promise<void> {
-    return this.mainWindow().load(uri, params)
+  async load(uri = '', params?: Record<string, string>): Promise<Result<void, LoadError>> {
+    const window = this.mainWindow()
+    return window.isErr() ? window : window.unwrap().load(uri, params)
   }
 
   /**
@@ -402,8 +438,12 @@ export class App {
    * @param options Encoding settings.
    * @returns The encoded image bytes.
    */
-  screenshot(options?: { format?: 'png' | 'jpeg' | 'webp'; quality?: number }): Promise<Uint8Array> {
-    return this.mainWindow().screenshot(options)
+  async screenshot(options?: {
+    format?: 'png' | 'jpeg' | 'webp'
+    quality?: number
+  }): Promise<Result<Uint8Array, WindowError>> {
+    const window = this.mainWindow()
+    return window.isErr() ? window : window.unwrap().screenshot(options)
   }
 
   /**
@@ -414,8 +454,12 @@ export class App {
    * @param args Arguments for `script` when it is a function.
    * @returns The value the code produced.
    */
-  evaluate<T = unknown>(script: string | ((...args: any[]) => T), ...args: unknown[]): Promise<T> {
-    return this.mainWindow().evaluate(script, ...args)
+  async evaluate<T = unknown>(
+    script: string | ((...args: any[]) => T),
+    ...args: unknown[]
+  ): Promise<Result<T, EvaluateError>> {
+    const window = this.mainWindow()
+    return window.isErr() ? window : window.unwrap().evaluate(script, ...args)
   }
 
   #onTargetDestroyed(targetId: string): void {
@@ -443,9 +487,9 @@ export class App {
    * @example Quitting with the window
    * ```ts
    * import { launch } from "barlo";
- *
- * const app = await launch();
- *
+   *
+   * const app = (await launch()).unwrap();
+   *
    * app.onExit(() => process.exit(0));
    * ```
    */
@@ -470,7 +514,7 @@ export class App {
    * import { launch } from "barlo";
    *
    * {
-   *   await using app = await launch();
+   *   await using app = (await launch()).unwrap();
    *
    *   app.serveFolder("./www");
    *   await app.load("index.html");

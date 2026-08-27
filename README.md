@@ -5,12 +5,14 @@ Build desktop applications with [Bun](https://bun.com) and the Chrome you alread
 barlo is a port of [GoogleChromeLabs/carlo](https://github.com/GoogleChromeLabs/carlo), which was
 archived in April 2026. Same idea as the original: serve your web app from the runtime, open it in a
 chrome-less Chrome window, and let the page call back into system-capable code. No bundled Chromium,
-and — unlike Carlo — no dependencies at all.
+and — unlike Carlo — no Puppeteer and no browser download. Its one dependency is
+[better-result](https://github.com/dmmulroy/better-result), because failures are values here rather
+than exceptions.
 
 ```ts
 import { launch } from 'barlo'
 
-const app = await launch({ title: 'Hello', width: 800, height: 600 })
+const app = (await launch({ title: 'Hello', width: 800, height: 600 })).unwrap()
 
 app.serveFolder('./www')
 await app.exposeFunction('cwd', () => process.cwd())
@@ -92,6 +94,34 @@ Longer prefixes win; returning `undefined` falls through to the next route.
 - `window.shadowedFunctions()` — exposed names the page has taken back (see below).
 - `app.evaluate(fnOrExpression, ...args)` — run code in the page and get the value back.
 
+### Failures are values
+
+Nothing in barlo throws. Every fallible call returns a `Result`, so what can go wrong is in the
+signature and the compiler makes you deal with it:
+
+```ts
+const launched = await launch()
+
+launched.match({
+  ok: app => app.serveFolder('./www'),
+  err: e =>
+    e.match({
+      ChromeNotFoundError: () => console.error('Install Google Chrome.'),
+      LaunchTimeoutError: t => console.error(`Chrome stalled at ${t.phase}.`),
+      BrowserGoneError: () => console.error('Chrome exited during startup.'),
+    }),
+})
+```
+
+`match` over the error union is exhaustive, so a new failure mode becomes a compile error at every
+call site rather than a surprise at runtime. Narrow with `_tag`, `ChromeNotFoundError.is(e)`, or
+`match`; `unwrap()` when a failure genuinely should stop the program, `unwrapOr(fallback)` when it
+should not.
+
+The failures are `ChromeNotFoundError`, `LaunchTimeoutError`, `BrowserGoneError`,
+`WindowClosedError`, `NavigationError`, `EvaluationError`, and `ProtocolError` — all exported, all
+tagged, all carrying the fields that make them actionable rather than a message to parse.
+
 #### The page can take the name back
 
 A classic script's top-level `function` and `var` declarations become properties of `window`, which
@@ -125,7 +155,7 @@ Both `App` and `Window` implement `Symbol.asyncDispose`, so a scope can own them
 
 ```ts
 {
-  await using app = await launch()
+  await using app = (await launch()).unwrap()
 
   app.serveFolder('./www')
   await app.load('index.html')

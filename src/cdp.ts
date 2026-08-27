@@ -62,10 +62,10 @@ export class CDPSession {
    * @example Reading the page title
    * ```ts
    * import { launch } from "barlo";
- *
- * const app = await launch();
- *
-   * const session = app.mainWindow().session;
+   *
+   * const app = (await launch()).unwrap();
+   *
+   * const session = app.mainWindow().unwrap().session;
    *
    * const { result } = await session.send("Runtime.evaluate", {
    *   expression: "document.title",

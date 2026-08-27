@@ -4,7 +4,9 @@
  *
  * @module
  */
+import { Result } from 'better-result';
 import { type EmbeddedFiles, type RequestHandler } from './server';
+import { WindowClosedError, type EvaluateError, type LaunchError, type LoadError, type WindowError } from './errors';
 import { Window, type ExposedFunction } from './window';
 /** Settings for {@linkcode launch}. */
 export interface LaunchOptions {
@@ -114,7 +116,7 @@ export declare class App {
      * import { launch } from "barlo";
      * import index from "./www/index.html" with { type: "text" };
      *
-     * const app = await launch();
+     * const app = (await launch()).unwrap();
      *
      * app.serveEmbedded({ "index.html": index as unknown as string });
      * await app.load("index.html");
@@ -158,7 +160,7 @@ export declare class App {
      * ```ts
      * import { launch } from "barlo";
      *
-     * const app = await launch();
+     * const app = (await launch()).unwrap();
      *
      * await app.exposeFunction("readFile", (path: string) => Bun.file(path).text());
      * ```
@@ -171,7 +173,7 @@ export declare class App {
      *
      * @internal
      */
-    _start(): Promise<void>;
+    _start(): Promise<Result<App, LaunchError>>;
     /**
      * Opens another app window on the same origin.
      *
@@ -182,21 +184,19 @@ export declare class App {
      * @param uri A path relative to the origin for the new window to open.
      * Defaults to the origin root.
      * @returns The new window, already navigated and bridged.
-     * @throws When the app is not running, or when no new window appears within
-     * {@linkcode LaunchOptions.timeout} milliseconds.
      *
      * @example Opening a second window
      * ```ts
      * import { launch } from "barlo";
-   *
-   * const app = await launch();
-   *
-     * const preferences = await app.createWindow("preferences.html");
+     *
+     * const app = (await launch()).unwrap();
+     *
+     * const preferences = (await app.createWindow("preferences.html")).unwrap();
      *
      * await preferences.setBounds({ width: 480, height: 320 });
      * ```
      */
-    createWindow(uri?: string): Promise<Window>;
+    createWindow(uri?: string): Promise<Result<Window, LaunchError | WindowClosedError>>;
     /**
      * The application's first still-open window.
      *
@@ -204,10 +204,10 @@ export declare class App {
      * {@linkcode App.screenshot} are shorthands for calling the same method on
      * it.
      *
-     * @returns The oldest open window.
-     * @throws When every window has closed.
+     * @returns The oldest open window, or {@linkcode WindowClosedError} when
+     * every window has closed.
      */
-    mainWindow(): Window;
+    mainWindow(): Result<Window, WindowClosedError>;
     /**
      * Every open window, oldest first.
      *
@@ -220,7 +220,7 @@ export declare class App {
      * @param uri A path relative to the origin. Defaults to the origin root.
      * @param params Query parameters to append.
      */
-    load(uri?: string, params?: Record<string, string>): Promise<void>;
+    load(uri?: string, params?: Record<string, string>): Promise<Result<void, LoadError>>;
     /**
      * Captures the main window's viewport. See {@linkcode Window.screenshot}.
      *
@@ -230,7 +230,7 @@ export declare class App {
     screenshot(options?: {
         format?: 'png' | 'jpeg' | 'webp';
         quality?: number;
-    }): Promise<Uint8Array>;
+    }): Promise<Result<Uint8Array, WindowError>>;
     /**
      * Runs code in the main window. See {@linkcode Window.evaluate}.
      *
@@ -239,7 +239,7 @@ export declare class App {
      * @param args Arguments for `script` when it is a function.
      * @returns The value the code produced.
      */
-    evaluate<T = unknown>(script: string | ((...args: any[]) => T), ...args: unknown[]): Promise<T>;
+    evaluate<T = unknown>(script: string | ((...args: any[]) => T), ...args: unknown[]): Promise<Result<T, EvaluateError>>;
     /**
      * Registers a handler for the application exiting.
      *
@@ -253,9 +253,9 @@ export declare class App {
      * @example Quitting with the window
      * ```ts
      * import { launch } from "barlo";
-   *
-   * const app = await launch();
-   *
+     *
+     * const app = (await launch()).unwrap();
+     *
      * app.onExit(() => process.exit(0));
      * ```
      */
@@ -273,7 +273,7 @@ export declare class App {
      * import { launch } from "barlo";
      *
      * {
-     *   await using app = await launch();
+     *   await using app = (await launch()).unwrap();
      *
      *   app.serveFolder("./www");
      *   await app.load("index.html");

@@ -171,7 +171,7 @@ export class AppServer {
    * ```ts
    * import { launch } from "barlo";
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * app.serveOrigin("http://localhost:5173");
    * await app.load();
@@ -196,7 +196,7 @@ export class AppServer {
    * import { launch } from "barlo";
    * import index from "./www/index.html" with { type: "text" };
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * app.serveEmbedded({ "index.html": index as unknown as string });
    * await app.load("index.html");
@@ -221,7 +221,7 @@ export class AppServer {
    * ```ts
    * import { launch } from "barlo";
    *
-   * const app = await launch();
+   * const app = (await launch()).unwrap();
    *
    * app.serveHandler(request =>
    *   new URL(request.url).pathname === "/api/time"
