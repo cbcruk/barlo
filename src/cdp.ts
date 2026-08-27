@@ -23,8 +23,8 @@ type Handler = (params: any) => void
 interface Pending {
   /** Kept so a dropped connection can say which command it lost. */
   method: string
-  resolve: (value: any) => void
-  reject: (error: SendError) => void
+  succeed: (value: any) => void
+  fail: (error: SendError) => void
 }
 
 /**
@@ -133,9 +133,10 @@ export class CDPSession {
  * A live WebSocket connection to Chrome's DevTools endpoint.
  *
  * Owns the socket, the request/response correlation, and the session table.
- * When the socket closes, every in-flight command rejects and
- * `"__disconnected__"` is emitted on {@linkcode CDPConnection.browser}, which
- * is how {@linkcode App} learns that Chrome went away.
+ * When the socket closes, every in-flight command comes back as
+ * {@linkcode BrowserGoneError} and `"__disconnected__"` is emitted on
+ * {@linkcode CDPConnection.browser}, which is how {@linkcode App} learns that
+ * Chrome went away.
  */
 export class CDPConnection {
   #socket: WebSocket
@@ -167,17 +168,29 @@ export class CDPConnection {
    *
    * @param url A `ws://` DevTools browser endpoint.
    * @param signal Aborts the attempt while the socket is still opening.
-   * @returns A connection whose socket is open and ready for commands.
-   * @throws When the socket fails to open, or when `signal` aborts first.
+   * @returns A connection whose socket is open and ready for commands, or why
+   * the handshake did not complete.
    */
-  static async connect(url: string, signal?: AbortSignal): Promise<CDPConnection> {
+  static async connect(
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<Result<CDPConnection, BrowserGoneError>> {
     const socket = new WebSocket(url)
-    await new Promise<void>((resolve, reject) => {
-      socket.onopen = () => resolve()
-      socket.onerror = () => reject(new Error(`Failed to connect to ${url}`))
-      signal?.addEventListener('abort', () => reject(new Error('Aborted')), { once: true })
+    const opened = await new Promise<Result<void, BrowserGoneError>>(resolve => {
+      socket.onopen = () => resolve(Result.ok())
+      socket.onerror = () =>
+        resolve(Result.err(new BrowserGoneError({ message: `could not connect to ${url}` })))
+      signal?.addEventListener(
+        'abort',
+        () => resolve(Result.err(new BrowserGoneError({ message: `connecting to ${url} was aborted` }))),
+        { once: true },
+      )
     })
-    return new CDPConnection(socket)
+    if (opened.isErr()) {
+      socket.close()
+      return opened
+    }
+    return Result.ok(new CDPConnection(socket))
   }
 
   /** @internal */
@@ -207,8 +220,8 @@ export class CDPConnection {
     return new Promise(resolve => {
       this.#pending.set(id, {
         method,
-        resolve: value => resolve(Result.ok(value)),
-        reject: error => resolve(Result.err(error)),
+        succeed: value => resolve(Result.ok(value)),
+        fail: error => resolve(Result.err(error)),
       })
       this.#socket.send(JSON.stringify(message))
     })
@@ -221,14 +234,14 @@ export class CDPConnection {
       if (!pending) return
       this.#pending.delete(message.id)
       if (message.error) {
-        pending.reject(
+        pending.fail(
           new ProtocolError({
             method: pending.method,
             message: `${message.error.message} (${message.error.code})`,
           }),
         )
       } else {
-        pending.resolve(message.result)
+        pending.succeed(message.result)
       }
       return
     }
@@ -241,7 +254,7 @@ export class CDPConnection {
     if (this.#closed) return
     this.#closed = true
     for (const pending of this.#pending.values()) {
-      pending.reject(new BrowserGoneError({ message: `${pending.method}: ${error.message}` }))
+      pending.fail(new BrowserGoneError({ message: `${pending.method}: ${error.message}` }))
     }
     this.#pending.clear()
     this.browser._emit('__disconnected__', error)
@@ -255,14 +268,13 @@ export class CDPConnection {
   /**
    * Closes the socket.
    *
-   * Idempotent. In-flight commands are left to reject through the socket's
-   * close handler.
+   * Idempotent. In-flight commands are settled as
+   * {@linkcode BrowserGoneError} by the socket's close handler.
    */
   close(): void {
     if (this.#closed) return
     this.#closed = true
-    try {
-      this.#socket.close()
-    } catch {}
+    // A socket that refuses to close is one that is already gone.
+    Result.try({ try: () => this.#socket.close(), catch: () => undefined })
   }
 }

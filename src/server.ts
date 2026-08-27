@@ -10,6 +10,7 @@
  * @module
  */
 
+import { Result } from 'better-result'
 import { stat } from 'node:fs/promises'
 import { join, normalize, resolve, sep } from 'node:path'
 
@@ -53,10 +54,11 @@ function folderHandler(folder: string, prefix: string): RequestHandler {
     const target = resolve(root, normalize(relative))
     if (target !== root && !target.startsWith(root + sep)) return undefined
 
-    const candidates = [target]
-    try {
-      if ((await stat(target)).isDirectory()) candidates.push(join(target, 'index.html'))
-    } catch {}
+    // A path that cannot be stat'd is not a directory, which is all this asks.
+    const isDirectory = (await Result.tryPromise(() => stat(target)))
+      .map(s => s.isDirectory())
+      .unwrapOr(false)
+    const candidates = isDirectory ? [target, join(target, 'index.html')] : [target]
 
     for (const candidate of candidates) {
       const file = Bun.file(candidate)

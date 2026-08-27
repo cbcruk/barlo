@@ -150,28 +150,32 @@ export class Window {
   }
 
   async #onBindingCalled(payload: string): Promise<void> {
-    let call: RpcCall
-    try {
-      call = JSON.parse(payload)
-    } catch {
-      return
-    }
+    // Anything but a call of ours on this binding is not addressed to us.
+    const parsed = Result.try({
+      try: (): RpcCall => JSON.parse(payload),
+      catch: () => undefined,
+    })
+    if (parsed.isErr()) return
+    const call = parsed.unwrap()
 
+    // The exposed function is the one thing here that is allowed to throw: it
+    // is the caller's own code, and its throw is the page's rejection.
     const fn = this.#exposed.get(call.name)
-    let ok = true
-    let value: unknown
-    try {
-      if (!fn) throw new Error(`${call.name} is not exposed`)
-      value = await fn(...call.args)
-    } catch (error) {
-      ok = false
-      value = error
-    }
+    const outcome = await Result.tryPromise({
+      try: async () => {
+        if (!fn) throw new Error(`${call.name} is not exposed`)
+        return await fn(...call.args)
+      },
+      catch: (cause) => cause,
+    })
 
     // If the reply never lands, the page's promise never settles — a hang with
     // no error anywhere. Nothing here can fix that, but it can say so.
     const replied = await this.session.send('Runtime.evaluate', {
-      expression: resolverExpression(call.id, ok, value),
+      expression: outcome.match({
+        ok: value => resolverExpression(call.id, true, value),
+        err: error => resolverExpression(call.id, false, error),
+      }),
     })
     if (replied.isErr() && !this.#closed) {
       console.warn(

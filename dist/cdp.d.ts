@@ -93,9 +93,10 @@ export declare class CDPSession {
  * A live WebSocket connection to Chrome's DevTools endpoint.
  *
  * Owns the socket, the request/response correlation, and the session table.
- * When the socket closes, every in-flight command rejects and
- * `"__disconnected__"` is emitted on {@linkcode CDPConnection.browser}, which
- * is how {@linkcode App} learns that Chrome went away.
+ * When the socket closes, every in-flight command comes back as
+ * {@linkcode BrowserGoneError} and `"__disconnected__"` is emitted on
+ * {@linkcode CDPConnection.browser}, which is how {@linkcode App} learns that
+ * Chrome went away.
  */
 export declare class CDPConnection {
     #private;
@@ -113,10 +114,10 @@ export declare class CDPConnection {
      *
      * @param url A `ws://` DevTools browser endpoint.
      * @param signal Aborts the attempt while the socket is still opening.
-     * @returns A connection whose socket is open and ready for commands.
-     * @throws When the socket fails to open, or when `signal` aborts first.
+     * @returns A connection whose socket is open and ready for commands, or why
+     * the handshake did not complete.
      */
-    static connect(url: string, signal?: AbortSignal): Promise<CDPConnection>;
+    static connect(url: string, signal?: AbortSignal): Promise<Result<CDPConnection, BrowserGoneError>>;
     /** @internal */
     _register(sessionId: string): CDPSession;
     /** @internal */
@@ -126,8 +127,8 @@ export declare class CDPConnection {
     /**
      * Closes the socket.
      *
-     * Idempotent. In-flight commands are left to reject through the socket's
-     * close handler.
+     * Idempotent. In-flight commands are settled as
+     * {@linkcode BrowserGoneError} by the socket's close handler.
      */
     close(): void;
 }

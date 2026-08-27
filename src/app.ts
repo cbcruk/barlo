@@ -103,14 +103,18 @@ async function readEndpoint(
 
   while (Date.now() < deadline) {
     if (existsSync(portFile)) {
-      try {
-        const [port, path] = readFileSync(portFile, 'utf8').split('\n')
-        if (port && path) return Result.ok(`ws://127.0.0.1:${port}${path}`)
-      } catch {
-        // Windows locks the file while Chrome is writing it, so the read
-        // between "it exists" and "it is finished" fails with EBUSY. That is
-        // the same not-ready-yet as a missing file, so keep polling.
-      }
+      // Windows locks the file while Chrome is writing it, so the read between
+      // "it exists" and "it is finished" fails with EBUSY. That is the same
+      // not-ready-yet as a missing file, so an unreadable one keeps polling.
+      const endpoint = Result.try({
+        try: () => {
+          const [port, path] = readFileSync(portFile, 'utf8').split('\n')
+          return port && path ? `ws://127.0.0.1:${port}${path}` : undefined
+        },
+        catch: () => undefined,
+      })
+      const url = endpoint.unwrapOr(undefined)
+      if (url) return Result.ok(url)
     }
     await Bun.sleep(50)
   }
@@ -274,17 +278,8 @@ export class App {
    * @internal
    */
   async _start(): Promise<Result<App, LaunchError>> {
-    const started = await Result.tryPromise({
-      // #startup reports its own failures; tryPromise is only here for the
-      // handshake and the sync filesystem calls, which still reject.
-      try: () => this.#startup(),
-      catch: (cause): LaunchError =>
-        new BrowserGoneError({
-          message: cause instanceof Error ? cause.message : String(cause),
-        }),
-    })
-
-    const outcome = Result.flatten(started)
+    // #startup reports every failure as a value, so there is nothing to catch.
+    const outcome = await this.#startup()
     if (outcome.isErr()) this.exit() // never leave a stray Chrome or a socket behind
     return outcome.map(() => this)
   }
@@ -294,27 +289,38 @@ export class App {
     if (chrome.isErr()) return chrome
     this.#executable = chrome.unwrap()
 
-    if (this.#options.userDataDir) {
-      this.#profile = this.#options.userDataDir
-    } else {
-      this.#profile = mkdtempSync(join(tmpdir(), 'barlo-'))
-      this.#ownsProfile = true
-    }
+    // mkdtemp, Bun.serve and spawn are the foreign throwing APIs in this path;
+    // wrapping them keeps the whole of startup in the Result world.
+    const prepared = Result.try({
+      try: () => {
+        if (this.#options.userDataDir) {
+          this.#profile = this.#options.userDataDir
+        } else {
+          this.#profile = mkdtempSync(join(tmpdir(), 'barlo-'))
+          this.#ownsProfile = true
+        }
 
-    const origin = this.#server.listen()
+        const origin = this.#server.listen()
 
-    this.#chrome = spawn([this.#executable, ...this.#chromeArgs(origin)], {
-      stdout: 'ignore',
-      stderr: this.#options.verbose ? 'inherit' : 'ignore',
-      onExit: () => this.#onChromeExit(),
+        this.#chrome = spawn([this.#executable, ...this.#chromeArgs(origin)], {
+          stdout: 'ignore',
+          stderr: this.#options.verbose ? 'inherit' : 'ignore',
+          onExit: () => this.#onChromeExit(),
+        })
+      },
+      catch: (cause) =>
+        new BrowserGoneError({
+          message: cause instanceof Error ? cause.message : String(cause),
+        }),
     })
+    if (prepared.isErr()) return prepared
 
     const endpoint = await readEndpoint(this.#profile, this.#options.timeout ?? DEFAULT_TIMEOUT)
     if (endpoint.isErr()) return endpoint
 
-    // CDPConnection.connect is the one step that still rejects: it owns the
-    // WebSocket handshake, which has no Result to hand back yet.
-    this.#connection = await CDPConnection.connect(endpoint.unwrap())
+    const connected = await CDPConnection.connect(endpoint.unwrap())
+    if (connected.isErr()) return connected
+    this.#connection = connected.unwrap()
     this.#browser = this.#connection.browser
     this.#browser.on('__disconnected__', () => this.#onChromeExit())
 
@@ -578,13 +584,14 @@ export class App {
 
     this.#connection?.close()
     this.#server.stop()
-    try {
-      this.#chrome?.kill()
-    } catch {}
+    // Best effort: a browser that will not die and a directory that will not
+    // delete are both already the outcome being asked for.
+    Result.try({ try: () => this.#chrome?.kill(), catch: () => undefined })
     if (this.#ownsProfile) {
-      try {
-        rmSync(this.#profile, { recursive: true, force: true })
-      } catch {}
+      Result.try({
+        try: () => rmSync(this.#profile, { recursive: true, force: true }),
+        catch: () => undefined,
+      })
     }
     for (const handler of this.#exitHandlers) handler()
   }
