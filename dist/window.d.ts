@@ -236,6 +236,27 @@ export declare class Window {
      */
     _markClosed(): void;
     /**
+     * Closes the window when a `using` block ends.
+     *
+     * Equivalent to {@linkcode Window.close}. Closing the application's last
+     * window exits it, so a scoped window is a scoped application when it is the
+     * only one.
+     *
+     * @example A secondary window that cannot outlive its block
+     * ```ts
+     * import { launch } from "barlo";
+     *
+     * const app = await launch();
+     *
+     * {
+     *   await using preferences = await app.createWindow("preferences.html");
+     *
+     *   await preferences.evaluate("document.title");
+     * }
+     * ```
+     */
+    [Symbol.asyncDispose](): Promise<void>;
+    /**
      * Closes the window.
      *
      * Idempotent. Closing the last window of an {@linkcode App} exits the

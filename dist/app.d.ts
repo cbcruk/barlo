@@ -263,6 +263,27 @@ export declare class App {
     /** Whether the application has exited. */
     get exited(): boolean;
     /**
+     * Shuts the application down when a `using` block ends.
+     *
+     * Equivalent to {@linkcode App.exit}, so the window, Chrome, the server, and
+     * the profile directory are all released without a `try`/`finally`.
+     *
+     * @example Tying the app to a scope
+     * ```ts
+     * import { launch } from "barlo";
+     *
+     * {
+     *   await using app = await launch();
+     *
+     *   app.serveFolder("./www");
+     *   await app.load("index.html");
+     *   await app.evaluate("document.title");
+     * }
+     * // Chrome is gone here, even if the block threw.
+     * ```
+     */
+    [Symbol.asyncDispose](): Promise<void>;
+    /**
      * Shuts the application down.
      *
      * Closes the CDP connection, stops the HTTP server, kills Chrome, and

@@ -460,6 +460,30 @@ export class App {
   }
 
   /**
+   * Shuts the application down when a `using` block ends.
+   *
+   * Equivalent to {@linkcode App.exit}, so the window, Chrome, the server, and
+   * the profile directory are all released without a `try`/`finally`.
+   *
+   * @example Tying the app to a scope
+   * ```ts
+   * import { launch } from "barlo";
+   *
+   * {
+   *   await using app = await launch();
+   *
+   *   app.serveFolder("./www");
+   *   await app.load("index.html");
+   *   await app.evaluate("document.title");
+   * }
+   * // Chrome is gone here, even if the block threw.
+   * ```
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.exit()
+  }
+
+  /**
    * Shuts the application down.
    *
    * Closes the CDP connection, stops the HTTP server, kills Chrome, and
@@ -469,6 +493,11 @@ export class App {
   exit(): void {
     if (this.#exited) return
     this.#exited = true
+
+    // Closing the connection ourselves means no `__disconnected__` arrives to
+    // do this, and a window left open here would hand out a session whose
+    // Chrome is already gone.
+    for (const window of this.#windows) window._markClosed()
 
     this.#connection?.close()
     this.#server.stop()

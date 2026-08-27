@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { launch, type App } from '../src/index'
+import { launch, type App, type Window } from '../src/index'
 
 const www = mkdtempSync(join(tmpdir(), 'barlo-test-www-'))
 writeFileSync(join(www, 'index.html'), '<!doctype html><title>Fixture</title><h1 id="t">hello</h1>')
@@ -175,6 +175,44 @@ describe('multiple windows', () => {
       await second.close()
     }
     expect(app.windows().length).toBe(1)
+  }, 60_000)
+})
+
+describe('scoped disposal', () => {
+  test('await using exits the app at the end of the block', async () => {
+    let seen: App | undefined
+    {
+      await using scoped = await launch({ width: 400, height: 300 })
+      seen = scoped
+      expect(scoped.exited).toBe(false)
+      expect(scoped.windows().length).toBe(1)
+    }
+    expect(seen.exited).toBe(true)
+    expect(seen.windows().length).toBe(0)
+  }, 60_000)
+
+  test('await using exits the app even when the block throws', async () => {
+    let seen: App | undefined
+    await expect(
+      (async () => {
+        await using scoped = await launch({ width: 400, height: 300 })
+        seen = scoped
+        throw new Error('boom')
+      })(),
+    ).rejects.toThrow('boom')
+    expect(seen!.exited).toBe(true)
+  }, 60_000)
+
+  test('await using closes a window without exiting its app', async () => {
+    let closed: Window | undefined
+    {
+      await using second = await app.createWindow('nested.html')
+      closed = second
+      expect(app.windows().length).toBe(2)
+    }
+    expect(closed.closed).toBe(true)
+    expect(app.windows().length).toBe(1)
+    expect(app.exited).toBe(false)
   }, 60_000)
 })
 

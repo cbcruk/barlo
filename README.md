@@ -121,6 +121,18 @@ the running browser process handles. CDP has no app-mode window type, so there i
 `app.onExit(handler)` fires when the last window closes or Chrome quits. `app.exit()` tears down the
 connection, the server, and Chrome, and removes the profile if barlo created it.
 
+Both `App` and `Window` implement `Symbol.asyncDispose`, so a scope can own them:
+
+```ts
+{
+  await using app = await launch()
+
+  app.serveFolder('./www')
+  await app.load('index.html')
+}
+// Chrome is gone here, even if the block threw.
+```
+
 ## Single-file executables
 
 ```sh
