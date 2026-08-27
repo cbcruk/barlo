@@ -11,6 +11,15 @@ import { ChromeNotFoundError, ProtocolError, launch, type App, type Window } fro
  * Unwraps a Result in a test, failing with the tagged error rather than a
  * `Panic` that hides which failure it was.
  */
+/**
+ * Launch timeout for the suite.
+ *
+ * The product default is 20s, which suits a desktop. CI runs three jobs on two
+ * cores and this suite starts Chrome seven times, so a slow start there is
+ * contention rather than the failure the test is looking for.
+ */
+const LAUNCH_TIMEOUT = 60_000
+
 function must<T, E>(result: Result<T, E>): T {
   if (result.isErr()) {
     const e = result.error as { _tag?: string; message?: string }
@@ -49,7 +58,7 @@ const MAX_APP_CHROME = 60
 let app: App
 
 beforeAll(async () => {
-  app = must(await launch({ width: 640, height: 480, title: 'Barlo Test' }))
+  app = must(await launch({ width: 640, height: 480, title: 'Barlo Test', timeout: LAUNCH_TIMEOUT }))
   app.serveFolder(www)
   app.serveHandler(request =>
     new URL(request.url).pathname === '/api/ping' ? new Response('pong') : undefined,
@@ -196,7 +205,7 @@ describe('scoped disposal', () => {
   test('await using exits the app at the end of the block', async () => {
     let seen: App | undefined
     {
-      await using scoped = must(await launch({ width: 400, height: 300 }))
+      await using scoped = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
       seen = scoped
       expect(scoped.exited).toBe(false)
       expect(scoped.windows().length).toBe(1)
@@ -209,7 +218,7 @@ describe('scoped disposal', () => {
     let seen: App | undefined
     await expect(
       (async () => {
-        await using scoped = must(await launch({ width: 400, height: 300 }))
+        await using scoped = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
         seen = scoped
         throw new Error('boom')
       })(),
@@ -250,7 +259,7 @@ describe('failures are values', () => {
   }, 60_000)
 
   test('operating on a closed app reports WindowClosedError', async () => {
-    const solo = must(await launch({ width: 400, height: 300 }))
+    const solo = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
     solo.exit()
 
     const result = await solo.evaluate('1 + 1')
@@ -286,7 +295,7 @@ describe('the protocol layer', () => {
   })
 
   test('a command on a dead connection comes back as BrowserGoneError', async () => {
-    const solo = must(await launch({ width: 400, height: 300 }))
+    const solo = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
     const session = must(solo.mainWindow()).session
     solo.exit()
 
@@ -296,7 +305,7 @@ describe('the protocol layer', () => {
   }, 60_000)
 
   test('exposeFunction reports a window it could not reach', async () => {
-    const solo = must(await launch({ width: 400, height: 300 }))
+    const solo = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
     solo.exit()
 
     const exposed = await solo.exposeFunction('late', () => 1)
@@ -307,7 +316,7 @@ describe('the protocol layer', () => {
 
 describe('lifecycle', () => {
   test('fires onExit when the app exits', async () => {
-    const solo = must(await launch({ width: 400, height: 300 }))
+    const solo = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
     let exited = false
     solo.onExit(() => (exited = true))
     solo.exit()

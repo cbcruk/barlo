@@ -18,7 +18,7 @@ test('a compiled binary serves embedded assets and answers exposed calls', async
     join(dir, 'app.ts'),
     `import index from './index.html' with { type: 'text' }
      import { launch } from ${JSON.stringify(join(REPO, 'src/index.ts'))}
-     const app = (await launch({ width: 480, height: 360 })).unwrap()
+     const app = (await launch({ width: 480, height: 360, timeout: 60000 })).unwrap()
      app.serveEmbedded({ 'index.html': index })
      await app.exposeFunction('mul', (a, b) => a * b)
      await app.load('index.html')
