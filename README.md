@@ -239,7 +239,11 @@ where bun installs no devDependencies, and would fail for any consumer who
 trusts the script.
 
 Releases run from a `v*` tag, which the workflow checks against the version in
-`package.json`. Publishing needs an `NPM_TOKEN` repository secret.
+`package.json`. Publishing authenticates with npm trusted publishing over OIDC
+rather than a stored token, so the release workflow holds no secret and npm
+attaches a provenance attestation to every version. The trusted publisher
+configured on npm names `.github/workflows/release.yml`, so renaming that file
+means updating the entry on npmjs.com too.
 
 ## License
 

@@ -1,10 +1,19 @@
 name: Release
 
 # Publishes whatever tag was pushed, so the version in package.json must match
-# the tag. Requires an NPM_TOKEN secret with publish rights.
+# the tag. Authentication is npm trusted publishing over OIDC: npm mints a
+# short-lived credential for this workflow at publish time, so there is no
+# long-lived token to leak or to rotate. The trusted publisher registered on
+# npmjs.com names this file, so renaming it stops publishing until that entry
+# is updated to match.
 on:
   push:
     tags: ['v*']
+
+permissions:
+  contents: read
+  # Lets GitHub mint the OIDC token that npm exchanges for publish rights.
+  id-token: write
 
 jobs:
   publish:
@@ -21,6 +30,11 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # Node 22 ships npm 10, which cannot do the OIDC exchange. 11.5.1 is the
+      # first version that can.
+      - name: Use an npm that speaks OIDC
+        run: npm install -g npm@latest
+
       - run: bun install --frozen-lockfile
 
       - name: Verify the tag matches package.json
@@ -36,8 +50,9 @@ jobs:
       - run: bun run docs:check
       - run: xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test
 
-      # `prepack` runs the declaration build, so dist/ is produced here.
+      # `prepack` runs the declaration build, so dist/ is produced here. npm
+      # also attaches a provenance attestation on its own when publishing this
+      # way; `--provenance` is not needed and the repository has to stay public
+      # for it to work.
       - name: Publish
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
