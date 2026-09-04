@@ -57,17 +57,9 @@ jobs:
             bun test
           fi
 
-      # Source-consistency checks, identical on every platform, so once is
-      # enough. dist/ is committed because installs from a GitHub URL cannot
-      # build it — bun blocks lifecycle scripts and installs no
-      # devDependencies for git dependencies.
-      - name: Declarations are up to date
-        if: runner.os == 'Linux'
-        run: |
-          bun run build
-          git diff --exit-code -- dist \
-            || { echo "::error::dist/ is stale — run 'bun run build' and commit the result"; exit 1; }
-
+      # Packaging check, identical on every platform, so once is enough. This
+      # is also what exercises the declaration build: `npm pack` runs `prepack`,
+      # and dist/ exists only as of that moment.
       - name: Verify the published package
         if: runner.os == 'Linux'
         run: |

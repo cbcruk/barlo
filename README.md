@@ -45,19 +45,17 @@ mode itself and talks CDP over a ~120-line client. That is Carlo's architecture,
 
 ## Install
 
-Straight from GitHub, with no npm publish involved:
-
 ```sh
-bun add github:cbcruk/barlo
-npm install github:cbcruk/barlo
+bun add barlo
+npm install barlo
 ```
 
-Pin a release by appending a tag — `github:cbcruk/barlo#v0.1.0`.
-
-Generated declarations are committed to `dist/` precisely so that this works:
-bun blocks lifecycle scripts by default and installs no devDependencies for git
-dependencies, so nothing can build them at install time. CI fails if the
-committed output drifts from the source.
+Installing from GitHub instead — `bun add github:cbcruk/barlo` — still runs,
+because `exports` sends Bun to `src/index.ts`, but it carries no type
+declarations: `dist/` is generated when the package is packed rather than
+committed, and bun blocks lifecycle scripts and installs no devDependencies for
+git dependencies, so nothing can build it at install time. Use the registry to
+get types.
 
 Requires Bun and a locally installed Chrome, Chromium, Edge, or Brave. barlo checks the usual
 per-platform locations and Playwright's browser cache; override with `BARLO_CHROME_PATH`.
@@ -234,7 +232,7 @@ declarations. The `exports` map sends Bun to `src/index.ts`, so stack traces
 point at real source and there is no bundle step at runtime, while `types`
 resolves to `dist/index.d.ts`, so a consumer never type-checks barlo's
 implementation. `prepack` rebuilds the declarations when packing, so a published
-tarball never carries stale output.
+tarball never carries stale output and `dist/` never enters git.
 
 `prepare` is deliberately not used: it would run on a git-dependency install,
 where bun installs no devDependencies, and would fail for any consumer who
