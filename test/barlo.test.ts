@@ -42,6 +42,14 @@ writeFileSync(
   `<!doctype html><script>;(() => { async function add() { return 'page' } })()</script>`,
 )
 writeFileSync(
+  join(www, 'picker.html'),
+  `<!doctype html><input type="file" id="pick"><p id="not-an-input"></p>
+  <script>globalThis.changes = 0; pick.addEventListener('change', () => changes++)</script>`,
+)
+// Large enough that sending it as an exposed function's result would take seconds.
+const bigFile = join(www, 'big.bin')
+writeFileSync(bigFile, Buffer.alloc(16 * 1024 * 1024, 7))
+writeFileSync(
   join(www, 'module.html'),
   `<!doctype html><script type="module">async function add() { return 'page' }</script>`,
 )
@@ -252,6 +260,32 @@ describe('multiple windows', () => {
   }, 60_000)
 })
 
+describe('provideFile', () => {
+  test('hands a file to the input without sending it over the bridge', async () => {
+    must(await app.load('picker.html'))
+    const started = performance.now()
+    must(await app.provideFile('#pick', [bigFile]))
+    const read = must(
+      await app.evaluate<unknown>(async () => {
+        const file = (document.getElementById('pick') as HTMLInputElement).files![0]!
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        return { name: file.name, size: file.size, first: bytes[0], changes: (globalThis as any).changes }
+      }),
+    )
+    expect(read).toEqual({ name: 'big.bin', size: 16 * 1024 * 1024, first: 7, changes: 1 })
+    expect(performance.now() - started).toBeLessThan(5_000)
+  })
+
+  test('refuses an element that is not a file input', async () => {
+    must(await app.load('picker.html'))
+    for (const selector of ['#not-an-input', '#missing', '!!not a selector']) {
+      const result = await app.provideFile(selector, [bigFile])
+      expect(result.isErr()).toBe(true)
+      if (result.isErr()) expect(result.error._tag).toBe('EvaluationError')
+    }
+  })
+})
+
 describe('the bridge answers only its own origin', () => {
   // Counts calls that reached Bun at all, since a foreign frame getting no
   // answer is not enough: the function must not have run.
@@ -316,6 +350,35 @@ describe('the bridge answers only its own origin', () => {
     )
     expect(must(answer)).toBe('ignored')
     expect(probed).toBe(0)
+  })
+
+  test('provideFile gives nothing to a window that navigated off-origin', async () => {
+    const foreignOrigin = foreign.url.origin
+    await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/`)}`)
+    await waitForOrigin(foreignOrigin)
+    try {
+      must(await app.evaluate(() => document.body.append(Object.assign(document.createElement('input'), { type: 'file', id: 'pick' }))))
+      const result = await app.provideFile('#pick', [bigFile])
+      expect(result.isErr()).toBe(true)
+      expect(must(await app.evaluate<number>('document.getElementById("pick").files.length'))).toBe(0)
+    } finally {
+      must(await app.load('index.html'))
+    }
+  })
+
+  test('provideFile looks only at the top document, not into frames', async () => {
+    const framed = await app.evaluate<unknown>(
+      (src: string) =>
+        new Promise(resolve => {
+          const frame = Object.assign(document.createElement('iframe'), { src })
+          frame.onload = () => resolve(true)
+          document.body.append(frame)
+        }),
+      `${foreign.url.origin}/`,
+    )
+    expect(must(framed)).toBe(true)
+    const result = await app.provideFile('input[type=file]', [bigFile])
+    expect(result.isErr()).toBe(true)
   })
 
   test('createWindow refuses to open off-origin', async () => {

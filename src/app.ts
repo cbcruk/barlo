@@ -530,6 +530,17 @@ export class App {
   }
 
   /**
+   * Hands files on disk to a file input in the main window. See {@linkcode Window.provideFile}.
+   *
+   * @param selector A CSS selector for the input.
+   * @param paths Absolute paths of the files to provide.
+   */
+  async provideFile(selector: string, paths: string[]): Promise<Result<void, EvaluateError>> {
+    const window = this.mainWindow()
+    return window.isErr() ? window : window.unwrap().provideFile(selector, paths)
+  }
+
+  /**
    * Registers a handler for the application exiting.
    *
    * Fires when the last window closes, when Chrome quits, and when

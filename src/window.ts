@@ -37,6 +37,13 @@ export interface Bounds {
 
 type WindowState = 'normal' | 'minimized' | 'maximized' | 'fullscreen'
 
+interface ExecutionContext {
+  origin: string
+  frameId: string | undefined
+  /** Whether this is the frame's main world rather than an isolated one. */
+  isDefault: boolean
+}
+
 /**
  * A Bun-side function callable from the page.
  *
@@ -72,8 +79,8 @@ export class Window {
   #exposed: Map<string, ExposedFunction>
   #title: string | undefined
   #bootstrapId: string | undefined
-  /** Origin of every live execution context in the page, keyed by context id. */
-  #contexts = new Map<number, string>()
+  /** Every live execution context in the page, keyed by context id. */
+  #contexts = new Map<number, ExecutionContext>()
   #closeHandlers = new Set<() => void>()
   #closed = false
 
@@ -107,7 +114,11 @@ export class Window {
     // Subscribed before Runtime.enable, which reports the contexts that
     // already exist as it turns on.
     this.session.on('Runtime.executionContextCreated', ({ context }) => {
-      this.#contexts.set(context.id, context.origin)
+      this.#contexts.set(context.id, {
+        origin: context.origin,
+        frameId: context.auxData?.frameId,
+        isDefault: context.auxData?.isDefault === true,
+      })
     })
     this.session.on('Runtime.executionContextDestroyed', ({ executionContextId }) => {
       this.#contexts.delete(executionContextId)
@@ -121,7 +132,7 @@ export class Window {
       // The binding is installed in every frame of the tab, whatever it has
       // navigated to, so a call is only answered when it comes from our origin.
       if (params.name !== BINDING) return
-      if (this.#contexts.get(params.executionContextId) !== this.#origin) return
+      if (this.#contexts.get(params.executionContextId)?.origin !== this.#origin) return
       void this.#onBindingCalled(params.payload, params.executionContextId)
     })
     await this.syncBridge()
@@ -425,6 +436,94 @@ export class Window {
       )
     }
     return Result.ok(result.result.value as T)
+  }
+
+  /**
+   * Hands files on disk to an `<input type="file">` in the page, as if the user had picked them.
+   *
+   * The page gets `File` objects that Chrome reads straight from disk, so this is the way to give a
+   * page large files: {@linkcode App.exposeFunction} results travel as JSON through CDP, which
+   * slows down sharply with size and holds up every other call while it does. The input fires
+   * `input` and `change` as it would for a real pick.
+   *
+   * The input is looked up only in the window's top-level document, and only while that document
+   * is on the application's origin. A window that has navigated elsewhere, or a cross-origin
+   * `<iframe>`, is never given a file.
+   *
+   * > Whatever is passed here becomes readable by the page, so check the paths before calling.
+   * > A `blob:` URL made from one of these files runs with the application's origin: shown in an
+   * > `<iframe>` or navigated to, an HTML or SVG file can call every exposed function. Give such a
+   * > blob a MIME type you checked yourself, with `file.slice(0, file.size, type)`, and show
+   * > images through `<img>`.
+   *
+   * A `File` stops being readable once its file changes on disk, so call this again after a change.
+   *
+   * @param selector A CSS selector for the input, matched with `document.querySelector`.
+   * @param paths Absolute paths of the files to provide.
+   * @returns Nothing once the input holds the files, or {@linkcode EvaluationError} when the window
+   * is off-origin, the selector is invalid, or it matches no file input.
+   *
+   * @example Previewing a large file without the bridge
+   * ```ts
+   * import { launch } from "barlo";
+   *
+   * const app = (await launch()).unwrap();
+   *
+   * await app.load("index.html");
+   * await app.mainWindow().unwrap().provideFile("#preview-input", ["/tmp/video.mp4"]);
+   * ```
+   *
+   * The page then reads `document.querySelector("#preview-input").files[0]`.
+   */
+  async provideFile(selector: string, paths: string[]): Promise<Result<void, EvaluateError>> {
+    const guarded = this.#guard('DOM.setFileInputFiles')
+    if (guarded.isErr()) return guarded
+
+    const contextId = this.#appDocumentContext()
+    if (contextId === undefined) {
+      return Result.err(
+        new EvaluationError({
+          message: "provideFile: the window is not showing a page from the application's origin",
+        }),
+      )
+    }
+
+    const found = await this.session.send<any>('Runtime.evaluate', {
+      contextId,
+      expression: `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)})
+        return el instanceof HTMLInputElement && el.type === 'file' ? el : null
+      })()`,
+    })
+    if (found.isErr()) return found
+    const { result, exceptionDetails } = found.unwrap()
+    if (exceptionDetails) {
+      return Result.err(
+        new EvaluationError({
+          message: exceptionDetails.exception?.description ?? exceptionDetails.text ?? 'Evaluation failed',
+        }),
+      )
+    }
+    const objectId: string | undefined = result.objectId
+    if (!objectId) {
+      return Result.err(
+        new EvaluationError({ message: `provideFile: no <input type="file"> matches ${selector}` }),
+      )
+    }
+
+    const set = await this.session.send('DOM.setFileInputFiles', { files: paths, objectId })
+    await this.session.send('Runtime.releaseObject', { objectId })
+    return set.map(() => undefined)
+  }
+
+  /** The main world of the top-level document, when that document is on the app's origin. */
+  #appDocumentContext(): number | undefined {
+    for (const [id, context] of this.#contexts) {
+      if (context.frameId === this.targetId && context.isDefault && context.origin === this.#origin) {
+        return id
+      }
+    }
+    return undefined
   }
 
   /**
