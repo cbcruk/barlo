@@ -153,6 +153,22 @@ to the calling context alone, never to whatever document replaced it.
 origin, since a window pointed at a remote site would only be a window without a
 bridge.
 
+#### The origin is the boundary
+
+Every document on the application's origin can call every exposed function. That
+includes documents the application never served but which inherit its origin: a
+`blob:` URL the page opens, an `about:blank` or `srcdoc` frame it builds, and a
+popup it opens with `window.open()`. Even if barlo refused their direct calls,
+they could reach the bridge through `parent`, `opener`, or a served page they
+frame, since same-origin documents share everything. So barlo does not try to
+tell them apart.
+
+To show content you do not trust, such as a file the user is previewing, give it
+an opaque origin: an `<iframe sandbox>` **without** `allow-same-origin` or
+`allow-popups-to-escape-sandbox`, filled with `srcdoc`. Never show it through an
+unsandboxed `blob:` URL, in a frame or a window. A sandboxed frame can still
+`postMessage` the page, so validate any message the page listens for.
+
 #### Large files go through a file input, not the bridge
 
 Exposed functions answer through `Runtime.evaluate` as JSON, which slows down
@@ -162,10 +178,13 @@ instead puts files on disk into an `<input type="file">` in the page, as if the
 user had picked them, and Chrome reads them straight from disk. Only the
 top-level document on the application's origin is ever given a file.
 
-The page can read whatever is passed, so check the paths first. A `blob:` URL
-made from one of these files shares the application's origin: an HTML or SVG
-file shown in an `<iframe>` or navigated to can call every exposed function.
-Retype blobs with a MIME type you checked, and show images through `<img>`.
+The page can read whatever is passed, so check the paths first. The top-document
+check only guards against mistakes: by the rule above, any same-origin document
+can reach the input or the bridge. A `blob:` URL made from one of these files
+shares the application's origin, so an HTML or SVG file shown through it can
+call every exposed function. Retype blobs with a MIME type you checked, show
+images through `<img>`, and show documents as described in "The origin is the
+boundary".
 
 ### Windows
 
