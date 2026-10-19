@@ -5,6 +5,8 @@
  */
 
 import { Result } from 'better-result'
+import { statSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 
 import type { CDPSession } from './cdp'
 import {
@@ -36,6 +38,10 @@ export interface Bounds {
 }
 
 type WindowState = 'normal' | 'minimized' | 'maximized' | 'fullscreen'
+
+function isRegularFile(path: string): boolean {
+  return Result.try({ try: () => statSync(path).isFile(), catch: () => false }).unwrapOr(false)
+}
 
 interface ExecutionContext {
   origin: string
@@ -458,10 +464,17 @@ export class Window {
    *
    * A `File` stops being readable once its file changes on disk, so call this again after a change.
    *
+   * Other details:
+   * - `document.querySelector` does not reach into shadow roots, so an input inside one is not found.
+   * - A disabled input still accepts files.
+   * - Passing `[]` clears the input.
+   *
    * @param selector A CSS selector for the input, matched with `document.querySelector`.
-   * @param paths Absolute paths of the files to provide.
-   * @returns Nothing once the input holds the files, or {@linkcode EvaluationError} when the window
-   * is off-origin, the selector is invalid, or it matches no file input.
+   * @param paths Absolute paths of regular files. More than one needs an input with `multiple`.
+   * @returns Nothing once the input holds the files. {@linkcode EvaluationError} when a path is
+   * relative or not a regular file, the window is off-origin, the selector is invalid, it matches no
+   * file input, or several paths meet an input without `multiple`. {@linkcode WindowClosedError} or
+   * {@linkcode ProtocolError} when the window closed or was navigating.
    *
    * @example Previewing a large file without the bridge
    * ```ts
@@ -470,7 +483,8 @@ export class Window {
    * const app = (await launch()).unwrap();
    *
    * await app.load("index.html");
-   * await app.mainWindow().unwrap().provideFile("#preview-input", ["/tmp/video.mp4"]);
+   * const provided = await app.provideFile("#preview-input", ["/tmp/video.mp4"]);
+   * if (provided.isErr()) console.error(provided.error.message);
    * ```
    *
    * The page then reads `document.querySelector("#preview-input").files[0]`.
@@ -478,6 +492,15 @@ export class Window {
   async provideFile(selector: string, paths: string[]): Promise<Result<void, EvaluateError>> {
     const guarded = this.#guard('DOM.setFileInputFiles')
     if (guarded.isErr()) return guarded
+
+    // Chrome accepts any string here: a missing file arrives as an empty File that fails to read,
+    // and a relative path has been seen to leave the window unable to load another page.
+    const bad = paths.find(p => !isAbsolute(p) || !isRegularFile(p))
+    if (bad !== undefined) {
+      return Result.err(
+        new EvaluationError({ message: `provideFile: not an absolute path to a regular file: ${bad}` }),
+      )
+    }
 
     const contextId = this.#appDocumentContext()
     if (contextId === undefined) {
@@ -492,7 +515,8 @@ export class Window {
       contextId,
       expression: `(() => {
         const el = document.querySelector(${JSON.stringify(selector)})
-        return el instanceof HTMLInputElement && el.type === 'file' ? el : null
+        if (!(el instanceof HTMLInputElement) || el.type !== 'file') return null
+        return el.multiple || ${paths.length} <= 1 ? el : 'single'
       })()`,
     })
     if (found.isErr()) return found
@@ -501,6 +525,13 @@ export class Window {
       return Result.err(
         new EvaluationError({
           message: exceptionDetails.exception?.description ?? exceptionDetails.text ?? 'Evaluation failed',
+        }),
+      )
+    }
+    if (result.value === 'single') {
+      return Result.err(
+        new EvaluationError({
+          message: `provideFile: ${selector} takes one file; add the multiple attribute for more`,
         }),
       )
     }
