@@ -164,9 +164,10 @@ frame, since same-origin documents share everything. So barlo does not try to
 tell them apart.
 
 To show content you do not trust, such as a file the user is previewing, give it
-an opaque origin: an `<iframe sandbox>` **without** `allow-same-origin`, filled
-with `srcdoc`. Never show it through a `blob:` URL in a frame or a window, and
-never add `allow-same-origin` to its sandbox.
+an opaque origin: an `<iframe sandbox>` **without** `allow-same-origin` or
+`allow-popups-to-escape-sandbox`, filled with `srcdoc`. Never show it through an
+unsandboxed `blob:` URL, in a frame or a window. A sandboxed frame can still
+`postMessage` the page, so validate any message the page listens for.
 
 #### Large files go through a file input, not the bridge
 
@@ -177,10 +178,13 @@ instead puts files on disk into an `<input type="file">` in the page, as if the
 user had picked them, and Chrome reads them straight from disk. Only the
 top-level document on the application's origin is ever given a file.
 
-The page can read whatever is passed, so check the paths first. A `blob:` URL
-made from one of these files shares the application's origin: an HTML or SVG
-file shown in an `<iframe>` or navigated to can call every exposed function.
-Retype blobs with a MIME type you checked, and show images through `<img>`.
+The page can read whatever is passed, so check the paths first. The top-document
+check only guards against mistakes: by the rule above, any same-origin document
+can reach the input or the bridge. A `blob:` URL made from one of these files
+shares the application's origin, so an HTML or SVG file shown through it can
+call every exposed function. Retype blobs with a MIME type you checked, show
+images through `<img>`, and show documents as described in "The origin is the
+boundary".
 
 ### Windows
 

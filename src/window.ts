@@ -454,7 +454,9 @@ export class Window {
    *
    * The input is looked up only in the window's top-level document, and only while that document
    * is on the application's origin. A window that has navigated elsewhere, or a cross-origin
-   * `<iframe>`, is never given a file.
+   * `<iframe>`, is never given a file. This guards against mistakes, not hostile pages: a `blob:`
+   * document the page opens inherits the origin and passes, and any same-origin document can
+   * reach the page's inputs anyway.
    *
    * > Whatever is passed here becomes readable by the page, so check the paths before calling.
    * > The check this method makes, that each path is an absolute regular file, only catches
