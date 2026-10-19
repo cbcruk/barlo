@@ -144,10 +144,14 @@ the page does not declare — `__kill` rather than `kill`.
 
 Exposed functions are installed per window, not per document: CDP's binding and
 new-document script reach every frame the tab ever shows, including a page it
-navigates to and a cross-origin `<iframe>`. So barlo records the origin of each
-execution context and answers a call only when it comes from the application's
-origin; anything else is dropped without running the function. Replies go back
-to the calling context alone, never to whatever document replaced it.
+navigates to and a cross-origin `<iframe>`. So barlo answers a call only when it
+comes from a document the application's server delivered: the calling context
+must be on the application's origin, and its frame's URL must be too. The second
+check matters because a `blob:` document, an `about:srcdoc` frame, or an
+`about:blank` frame made by the page inherits the origin while holding content
+the app may not trust, such as a previewed file. Anything else is dropped
+without running the function. Replies go back to the calling context alone,
+never to whatever document replaced it.
 
 `load()` and `createWindow()` also refuse a target outside the application's
 origin, since a window pointed at a remote site would only be a window without a

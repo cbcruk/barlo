@@ -389,6 +389,60 @@ describe('the bridge answers only its own origin', () => {
     expect(probed).toBe(0)
   })
 
+  // A page that tries the bridge and the file input, for documents that
+  // inherit the app's origin without being served by it.
+  const inheritingPage = `<!doctype html><input type="file" id="pick"><script>
+    const answer = Promise.race([
+      probe(),
+      new Promise(resolve => setTimeout(() => resolve('ignored'), 500)),
+    ])
+    answer.then(value => parent !== window && parent.postMessage(value, '*'))
+    globalThis.answer = answer
+  </script>`
+
+  test('a blob: document the page opens inherits the origin but not the bridge', async () => {
+    must(await app.load('index.html'))
+    const appOrigin = must(await app.evaluate<string>('location.origin'))
+    await app.evaluate(
+      (html: string) => {
+        location.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }))
+      },
+      inheritingPage,
+    )
+    const deadline = Date.now() + 10_000
+    while (true) {
+      const now = await app.evaluate<string>('location.protocol + " " + document.readyState')
+      if (now.isOk() && now.unwrap() === 'blob: complete') break
+      if (Date.now() > deadline) throw new Error('the window never reached the blob: document')
+      await Bun.sleep(50)
+    }
+    try {
+      expect(must(await app.evaluate<string>('location.origin'))).toBe(appOrigin)
+      expect(must(await app.evaluate<string>('answer'))).toBe('ignored')
+      expect((await app.provideFile('#pick', [bigFile])).isErr()).toBe(true)
+      expect(must(await app.evaluate<number>('pick.files.length'))).toBe(0)
+    } finally {
+      must(await app.load('index.html'))
+    }
+    expect(probed).toBe(0)
+    expect(must(await app.evaluate<number>('probe()'))).toBe(1)
+    probed = 0
+  })
+
+  test('an about:srcdoc frame on the app origin gets no answers', async () => {
+    must(await app.load('index.html'))
+    const answer = await app.evaluate<unknown>(
+      (srcdoc: string) =>
+        new Promise(resolve => {
+          addEventListener('message', event => resolve(event.data), { once: true })
+          document.body.append(Object.assign(document.createElement('iframe'), { srcdoc }))
+        }),
+      inheritingPage,
+    )
+    expect(must(answer)).toBe('ignored')
+    expect(probed).toBe(0)
+  })
+
   test('provideFile gives nothing to a window that navigated off-origin', async () => {
     const foreignOrigin = foreign.url.origin
     await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/`)}`)

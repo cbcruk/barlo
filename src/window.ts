@@ -43,6 +43,20 @@ function isRegularFile(path: string): boolean {
   return Result.try({ try: () => statSync(path).isFile(), catch: () => false }).unwrapOr(false)
 }
 
+interface FrameTree {
+  frame: { id: string; url: string }
+  childFrames?: FrameTree[]
+}
+
+function frameUrl(tree: FrameTree, frameId: string): string | undefined {
+  if (tree.frame.id === frameId) return tree.frame.url
+  for (const child of tree.childFrames ?? []) {
+    const url = frameUrl(child, frameId)
+    if (url !== undefined) return url
+  }
+  return undefined
+}
+
 interface ExecutionContext {
   origin: string
   frameId: string | undefined
@@ -136,10 +150,13 @@ export class Window {
     await this.session.send('Runtime.addBinding', { name: BINDING })
     this.session.on('Runtime.bindingCalled', params => {
       // The binding is installed in every frame of the tab, whatever it has
-      // navigated to, so a call is only answered when it comes from our origin.
+      // navigated to, so a call is only answered when it comes from a document
+      // the app served.
       if (params.name !== BINDING) return
-      if (this.#contexts.get(params.executionContextId)?.origin !== this.#origin) return
-      void this.#onBindingCalled(params.payload, params.executionContextId)
+      const contextId = params.executionContextId
+      void this.#isAppDocument(contextId).then(async ok => {
+        if (ok) await this.#onBindingCalled(params.payload, contextId)
+      })
     })
     await this.syncBridge()
     this.session.on('Page.loadEventFired', () => {
@@ -453,8 +470,8 @@ export class Window {
    * `input` and `change` as it would for a real pick.
    *
    * The input is looked up only in the window's top-level document, and only while that document
-   * is on the application's origin. A window that has navigated elsewhere, or a cross-origin
-   * `<iframe>`, is never given a file.
+   * was served from the application's origin. A window that has navigated elsewhere, a frame, or
+   * a `blob:` document the page opened (which inherits the origin) is never given a file.
    *
    * > Whatever is passed here becomes readable by the page, so check the paths before calling.
    * > The check this method makes, that each path is an absolute regular file, only catches
@@ -505,7 +522,7 @@ export class Window {
     }
 
     const contextId = this.#appDocumentContext()
-    if (contextId === undefined) {
+    if (contextId === undefined || !(await this.#isAppDocument(contextId))) {
       return Result.err(
         new EvaluationError({
           message: "provideFile: the window is not showing a page from the application's origin",
@@ -547,6 +564,25 @@ export class Window {
     const set = await this.session.send('DOM.setFileInputFiles', { files: paths, objectId })
     await this.session.send('Runtime.releaseObject', { objectId })
     return set.map(() => undefined)
+  }
+
+  /**
+   * Whether a context belongs to a document the app's server delivered.
+   *
+   * Origin alone is not enough: a `blob:` document, an `about:srcdoc` frame,
+   * or an `about:blank` one made by the app's page inherits the app's origin
+   * while holding content the app may not trust, such as a file it previews.
+   * So the frame's committed URL must be on the origin too. It is read from
+   * the browser with `Page.getFrameTree` on every check rather than tracked
+   * from navigation events, since a new document's context can be reported
+   * before its navigation is, and nothing the page runs can change the answer.
+   */
+  async #isAppDocument(contextId: number): Promise<boolean> {
+    const context = this.#contexts.get(contextId)
+    if (!context || context.origin !== this.#origin || !context.frameId) return false
+    const tree = await this.session.send<{ frameTree: FrameTree }>('Page.getFrameTree')
+    if (tree.isErr()) return false
+    return frameUrl(tree.unwrap().frameTree, context.frameId)?.startsWith(`${this.#origin}/`) ?? false
   }
 
   /** The main world of the top-level document, when that document is on the app's origin. */
