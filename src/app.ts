@@ -242,6 +242,11 @@ export class App {
    * > declare, such as `__kill`. barlo warns after each load, and
    * > {@linkcode Window.shadowedFunctions} reports it for tests.
    *
+   * > Every document on the application's origin can call it, including a
+   * > `blob:` URL, `srcdoc` frame or `about:blank` popup the page creates,
+   * > directly or through `parent` and `opener`. Show untrusted content only
+   * > in an `<iframe sandbox>` without `allow-same-origin`.
+   *
    * @param name The global to define on the page. Overwrites an existing
    * global of that name, and can in turn be overwritten by one the page
    * declares.

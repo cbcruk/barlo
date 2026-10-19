@@ -144,18 +144,29 @@ the page does not declare — `__kill` rather than `kill`.
 
 Exposed functions are installed per window, not per document: CDP's binding and
 new-document script reach every frame the tab ever shows, including a page it
-navigates to and a cross-origin `<iframe>`. So barlo answers a call only when it
-comes from a document the application's server delivered: the calling context
-must be on the application's origin, and its frame's URL must be too. The second
-check matters because a `blob:` document, an `about:srcdoc` frame, or an
-`about:blank` frame made by the page inherits the origin while holding content
-the app may not trust, such as a previewed file. Anything else is dropped
-without running the function. Replies go back to the calling context alone,
-never to whatever document replaced it.
+navigates to and a cross-origin `<iframe>`. So barlo records the origin of each
+execution context and answers a call only when it comes from the application's
+origin; anything else is dropped without running the function. Replies go back
+to the calling context alone, never to whatever document replaced it.
 
 `load()` and `createWindow()` also refuse a target outside the application's
 origin, since a window pointed at a remote site would only be a window without a
 bridge.
+
+#### The origin is the boundary
+
+Every document on the application's origin can call every exposed function. That
+includes documents the application never served but which inherit its origin: a
+`blob:` URL the page opens, an `about:blank` or `srcdoc` frame it builds, and a
+popup it opens with `window.open()`. Even if barlo refused their direct calls,
+they could reach the bridge through `parent`, `opener`, or a served page they
+frame, since same-origin documents share everything. So barlo does not try to
+tell them apart.
+
+To show content you do not trust, such as a file the user is previewing, give it
+an opaque origin: an `<iframe sandbox>` **without** `allow-same-origin`, filled
+with `srcdoc`. Never show it through a `blob:` URL in a frame or a window, and
+never add `allow-same-origin` to its sandbox.
 
 #### Large files go through a file input, not the bridge
 
