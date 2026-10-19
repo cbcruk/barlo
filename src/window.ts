@@ -457,6 +457,8 @@ export class Window {
    * `<iframe>`, is never given a file.
    *
    * > Whatever is passed here becomes readable by the page, so check the paths before calling.
+   * > The check this method makes, that each path is an absolute regular file, only catches
+   * > mistakes: Chrome reads the file later, by which time it may have been replaced.
    * > A `blob:` URL made from one of these files runs with the application's origin: shown in an
    * > `<iframe>` or navigated to, an HTML or SVG file can call every exposed function. Give such a
    * > blob a MIME type you checked yourself, with `file.slice(0, file.size, type)`, and show
