@@ -18,6 +18,7 @@ import {
   BrowserGoneError,
   ChromeNotFoundError,
   LaunchTimeoutError,
+  NavigationError,
   WindowClosedError,
   type EvaluateError,
   type LaunchError,
@@ -400,8 +401,10 @@ export class App {
    * app-mode window type. The new window inherits every exposed function.
    *
    * @param uri A path relative to the origin for the new window to open.
-   * Defaults to the origin root.
-   * @returns The new window, already navigated and bridged.
+   * Defaults to the origin root. A target outside the origin is refused, as
+   * {@linkcode Window.load} refuses it.
+   * @returns The new window, already navigated and bridged, or
+   * {@linkcode NavigationError} when `uri` resolved off-origin.
    *
    * @example Opening a second window
    * ```ts
@@ -414,13 +417,26 @@ export class App {
    * await preferences.setBounds({ width: 480, height: 320 });
    * ```
    */
-  async createWindow(uri = ''): Promise<Result<Window, LaunchError | WindowClosedError>> {
+  async createWindow(
+    uri = '',
+  ): Promise<Result<Window, LaunchError | NavigationError | WindowClosedError>> {
     if (!this.#browser) {
       return Result.err(new WindowClosedError({ message: 'the app is not running' }))
     }
 
-    const known = new Set(this.#windows.map(w => w.targetId))
     const url = new URL(uri.replace(/^\//, ''), `${this.#server.origin}/`)
+    if (!url.href.startsWith(`${this.#server.origin}/`)) {
+      return Result.err(
+        new NavigationError({
+          url: url.href,
+          message:
+            `${uri} resolves outside the application's origin. createWindow() takes a ` +
+            `path relative to it, since the new window inherits every exposed function.`,
+        }),
+      )
+    }
+
+    const known = new Set(this.#windows.map(w => w.targetId))
     const { width = 800, height = 600 } = this.#options
 
     spawn([this.#executable, `--app=${url.href}`, `--user-data-dir=${this.#profile}`,
