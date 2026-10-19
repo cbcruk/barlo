@@ -252,6 +252,80 @@ describe('multiple windows', () => {
   }, 60_000)
 })
 
+describe('the bridge answers only its own origin', () => {
+  // Counts calls that reached Bun at all, since a foreign frame getting no
+  // answer is not enough: the function must not have run.
+  let probed = 0
+  beforeAll(async () => {
+    must(await app.exposeFunction('probe', () => ++probed))
+  })
+
+  // A second origin on another port. Its page tries the bridge and reports
+  // whether it got an answer, which is what an HTML preview or an embedded
+  // remote page would be able to do.
+  const foreign = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: () =>
+      new Response(
+        `<!doctype html><script>
+          const answer = Promise.race([
+            probe(),
+            new Promise(resolve => setTimeout(() => resolve('ignored'), 500)),
+          ])
+          answer.then(value => parent !== window && parent.postMessage(value, '*'))
+          globalThis.answer = answer
+        </script>`,
+        { headers: { 'content-type': 'text/html' } },
+      ),
+  })
+  afterAll(() => foreign.stop(true))
+
+  async function waitForOrigin(origin: string): Promise<void> {
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const now = await app.evaluate<string>('location.origin + " " + document.readyState')
+      if (now.isOk() && now.unwrap() === `${origin} complete`) return
+      await Bun.sleep(50)
+    }
+    throw new Error(`the window never reached ${origin}`)
+  }
+
+  test('a window navigated off-origin by the page gets no answers', async () => {
+    const foreignOrigin = foreign.url.origin
+    await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/`)}`)
+    await waitForOrigin(foreignOrigin)
+    try {
+      expect(must(await app.evaluate<string>('answer'))).toBe('ignored')
+    } finally {
+      must(await app.load('index.html'))
+    }
+    expect(probed).toBe(0)
+    expect(must(await app.evaluate<number>('probe()'))).toBe(1)
+    probed = 0
+  })
+
+  test('an off-origin frame inside the app gets no answers', async () => {
+    const answer = await app.evaluate<unknown>(
+      (src: string) =>
+        new Promise(resolve => {
+          addEventListener('message', event => resolve(event.data), { once: true })
+          document.body.append(Object.assign(document.createElement('iframe'), { src }))
+        }),
+      `${foreign.url.origin}/`,
+    )
+    expect(must(answer)).toBe('ignored')
+    expect(probed).toBe(0)
+  })
+
+  test('createWindow refuses to open off-origin', async () => {
+    const result = await app.createWindow(`${foreign.url.origin}/`)
+    expect(result.isErr()).toBe(true)
+    if (result.isErr()) expect(result.error._tag).toBe('NavigationError')
+    expect(app.windows().length).toBe(1)
+  })
+})
+
 describe('scoped disposal', () => {
   test('await using exits the app at the end of the block', async () => {
     let seen: App | undefined

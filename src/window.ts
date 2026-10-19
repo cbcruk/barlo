@@ -72,6 +72,8 @@ export class Window {
   #exposed: Map<string, ExposedFunction>
   #title: string | undefined
   #bootstrapId: string | undefined
+  /** Origin of every live execution context in the page, keyed by context id. */
+  #contexts = new Map<number, string>()
   #closeHandlers = new Set<() => void>()
   #closed = false
 
@@ -102,11 +104,25 @@ export class Window {
    * @internal
    */
   async _initialize(): Promise<void> {
+    // Subscribed before Runtime.enable, which reports the contexts that
+    // already exist as it turns on.
+    this.session.on('Runtime.executionContextCreated', ({ context }) => {
+      this.#contexts.set(context.id, context.origin)
+    })
+    this.session.on('Runtime.executionContextDestroyed', ({ executionContextId }) => {
+      this.#contexts.delete(executionContextId)
+    })
+    this.session.on('Runtime.executionContextsCleared', () => this.#contexts.clear())
+
     await this.session.send('Page.enable')
     await this.session.send('Runtime.enable')
     await this.session.send('Runtime.addBinding', { name: BINDING })
     this.session.on('Runtime.bindingCalled', params => {
-      if (params.name === BINDING) void this.#onBindingCalled(params.payload)
+      // The binding is installed in every frame of the tab, whatever it has
+      // navigated to, so a call is only answered when it comes from our origin.
+      if (params.name !== BINDING) return
+      if (this.#contexts.get(params.executionContextId) !== this.#origin) return
+      void this.#onBindingCalled(params.payload, params.executionContextId)
     })
     await this.syncBridge()
     this.session.on('Page.loadEventFired', () => {
@@ -149,7 +165,7 @@ export class Window {
     return installed.map(() => undefined)
   }
 
-  async #onBindingCalled(payload: string): Promise<void> {
+  async #onBindingCalled(payload: string, contextId: number): Promise<void> {
     // Anything but a call of ours on this binding is not addressed to us.
     const parsed = Result.try({
       try: (): RpcCall => JSON.parse(payload),
@@ -169,15 +185,20 @@ export class Window {
       catch: (cause) => cause,
     })
 
-    // If the reply never lands, the page's promise never settles — a hang with
-    // no error anywhere. Nothing here can fix that, but it can say so.
+    // The reply goes to the calling context only: the page may have navigated
+    // while the function ran, and the result belongs to the caller, not to
+    // whatever document replaced it.
     const replied = await this.session.send('Runtime.evaluate', {
+      contextId,
       expression: outcome.match({
         ok: value => resolverExpression(call.id, true, value),
         err: error => resolverExpression(call.id, false, error),
       }),
     })
-    if (replied.isErr() && !this.#closed) {
+    // If the reply never lands, the page's promise never settles — a hang with
+    // no error anywhere. Nothing here can fix that, but it can say so. A caller
+    // that has since gone away has no promise left to settle.
+    if (replied.isErr() && !this.#closed && this.#contexts.has(contextId)) {
       console.warn(
         `barlo: could not deliver the result of ${call.name}() to the page ` +
           `(${replied.error.message}), so its promise will never settle.`,
@@ -205,10 +226,11 @@ export class Window {
    * Resolves once the page's `load` event has fired, so the document is ready
    * for {@linkcode Window.evaluate} on return.
    *
-   * The path must stay on the origin. An absolute URL would replace it, and
-   * because {@linkcode App.exposeFunction} installs into the window rather than
-   * the document, navigating away would hand those functions to whatever loaded
-   * next — so an off-origin target is refused rather than followed.
+   * The path must stay on the origin, so an absolute URL elsewhere is refused
+   * rather than followed. {@linkcode App.exposeFunction} installs into the
+   * window rather than the document, so an off-origin page still sees the
+   * exposed names; barlo ignores its calls, but navigating there on purpose
+   * would only leave the window without a working bridge.
    *
    * @param uri A path such as `"index.html"`, relative to the origin. A
    * leading slash is tolerated. Defaults to the origin root.
