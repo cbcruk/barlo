@@ -42,6 +42,19 @@ writeFileSync(
   `<!doctype html><script>;(() => { async function add() { return 'page' } })()</script>`,
 )
 writeFileSync(
+  join(www, 'picker.html'),
+  `<!doctype html><input type="file" id="pick"><p id="not-an-input"></p>
+  <input type="file" id="many" multiple>
+  <script>
+    globalThis.events = []
+    pick.addEventListener('input', () => events.push('input'))
+    pick.addEventListener('change', () => events.push('change'))
+  </script>`,
+)
+// Large enough that sending it as an exposed function's result would take seconds.
+const bigFile = join(www, 'big.bin')
+writeFileSync(bigFile, Buffer.alloc(16 * 1024 * 1024, 7))
+writeFileSync(
   join(www, 'module.html'),
   `<!doctype html><script type="module">async function add() { return 'page' }</script>`,
 )
@@ -252,6 +265,56 @@ describe('multiple windows', () => {
   }, 60_000)
 })
 
+describe('provideFile', () => {
+  test('hands a file to the input without sending it over the bridge', async () => {
+    must(await app.load('picker.html'))
+    const started = performance.now()
+    must(await app.provideFile('#pick', [bigFile]))
+    const read = must(
+      await app.evaluate<unknown>(async () => {
+        const file = (document.getElementById('pick') as HTMLInputElement).files![0]!
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        return { name: file.name, size: file.size, first: bytes[0], events: (globalThis as any).events }
+      }),
+    )
+    expect(read).toEqual({
+      name: 'big.bin',
+      size: 16 * 1024 * 1024,
+      first: 7,
+      events: ['input', 'change'],
+    })
+    expect(performance.now() - started).toBeLessThan(5_000)
+  })
+
+  test('refuses paths Chrome would accept but cannot read', async () => {
+    must(await app.load('picker.html'))
+    for (const paths of [['big.bin'], [join(www, 'missing.bin')], [www]]) {
+      const result = await app.provideFile('#pick', paths)
+      expect(result.isErr()).toBe(true)
+      if (result.isErr()) expect(result.error._tag).toBe('EvaluationError')
+    }
+    expect(must(await app.evaluate<number>('pick.files.length'))).toBe(0)
+    // The window still works afterwards, which a relative path used to break.
+    must(await app.load('index.html'))
+  })
+
+  test('gives several files only to an input that takes several', async () => {
+    must(await app.load('picker.html'))
+    expect((await app.provideFile('#pick', [bigFile, bigFile])).isErr()).toBe(true)
+    must(await app.provideFile('#many', [bigFile, join(www, 'index.html')]))
+    expect(must(await app.evaluate<number>('many.files.length'))).toBe(2)
+  })
+
+  test('refuses an element that is not a file input', async () => {
+    must(await app.load('picker.html'))
+    for (const selector of ['#not-an-input', '#missing', '!!not a selector']) {
+      const result = await app.provideFile(selector, [bigFile])
+      expect(result.isErr()).toBe(true)
+      if (result.isErr()) expect(result.error._tag).toBe('EvaluationError')
+    }
+  })
+})
+
 describe('the bridge answers only its own origin', () => {
   // Counts calls that reached Bun at all, since a foreign frame getting no
   // answer is not enough: the function must not have run.
@@ -266,8 +329,15 @@ describe('the bridge answers only its own origin', () => {
   const foreign = Bun.serve({
     port: 0,
     hostname: '127.0.0.1',
-    fetch: () =>
-      new Response(
+    fetch: request => {
+      // An app-origin page holding a file input, framed by a foreign top document.
+      const app = new URL(request.url).searchParams.get('app')
+      if (app) {
+        return new Response(`<!doctype html><iframe src="${app}/picker.html"></iframe>`, {
+          headers: { 'content-type': 'text/html' },
+        })
+      }
+      return new Response(
         `<!doctype html><script>
           const answer = Promise.race([
             probe(),
@@ -277,7 +347,8 @@ describe('the bridge answers only its own origin', () => {
           globalThis.answer = answer
         </script>`,
         { headers: { 'content-type': 'text/html' } },
-      ),
+      )
+    },
   })
   afterAll(() => foreign.stop(true))
 
@@ -316,6 +387,54 @@ describe('the bridge answers only its own origin', () => {
     )
     expect(must(answer)).toBe('ignored')
     expect(probed).toBe(0)
+  })
+
+  test('provideFile gives nothing to a window that navigated off-origin', async () => {
+    const foreignOrigin = foreign.url.origin
+    await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/`)}`)
+    await waitForOrigin(foreignOrigin)
+    try {
+      must(await app.evaluate(() => document.body.append(Object.assign(document.createElement('input'), { type: 'file', id: 'pick' }))))
+      const result = await app.provideFile('#pick', [bigFile])
+      expect(result.isErr()).toBe(true)
+      expect(must(await app.evaluate<number>('document.getElementById("pick").files.length'))).toBe(0)
+    } finally {
+      must(await app.load('index.html'))
+    }
+  })
+
+  test('provideFile ignores an app-origin frame inside a foreign page', async () => {
+    const appOrigin = must(await app.evaluate<string>('location.origin'))
+    const foreignOrigin = foreign.url.origin
+    await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/?app=${appOrigin}`)}`)
+    await waitForOrigin(foreignOrigin)
+    try {
+      const deadline = Date.now() + 10_000
+      while (!must(await app.evaluate<boolean>('frames.length > 0'))) {
+        if (Date.now() > deadline) throw new Error('the frame never appeared')
+        await Bun.sleep(50)
+      }
+      // The frame's own document loads after its element appears.
+      await Bun.sleep(500)
+      expect((await app.provideFile('#pick', [bigFile])).isErr()).toBe(true)
+    } finally {
+      must(await app.load('index.html'))
+    }
+  })
+
+  test('provideFile looks only at the top document, not into frames', async () => {
+    const framed = await app.evaluate<unknown>(
+      (src: string) =>
+        new Promise(resolve => {
+          const frame = Object.assign(document.createElement('iframe'), { src })
+          frame.onload = () => resolve(true)
+          document.body.append(frame)
+        }),
+      `${foreign.url.origin}/`,
+    )
+    expect(must(framed)).toBe(true)
+    const result = await app.provideFile('input[type=file]', [bigFile])
+    expect(result.isErr()).toBe(true)
   })
 
   test('createWindow refuses to open off-origin', async () => {

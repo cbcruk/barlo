@@ -91,6 +91,8 @@ Longer prefixes win; returning `undefined` falls through to the next route.
   exposed after load land on the current document too, without a reload.
 - `window.shadowedFunctions()` — exposed names the page has taken back (see below).
 - `app.evaluate(fnOrExpression, ...args)` — run code in the page and get the value back.
+- `app.provideFile(selector, paths)` — put files on disk into an `<input type="file">` in the page, for
+  files too large for the bridge (see below).
 
 ### Failures are values
 
@@ -151,10 +153,24 @@ to the calling context alone, never to whatever document replaced it.
 origin, since a window pointed at a remote site would only be a window without a
 bridge.
 
+#### Large files go through a file input, not the bridge
+
+Exposed functions answer through `Runtime.evaluate` as JSON, which slows down
+sharply with size — 8 MB takes about half a second, 100 MB about a minute — and
+holds up every other call meanwhile. `window.provideFile(selector, paths)`
+instead puts files on disk into an `<input type="file">` in the page, as if the
+user had picked them, and Chrome reads them straight from disk. Only the
+top-level document on the application's origin is ever given a file.
+
+The page can read whatever is passed, so check the paths first. A `blob:` URL
+made from one of these files shares the application's origin: an HTML or SVG
+file shown in an `<iframe>` or navigated to can call every exposed function.
+Retype blobs with a MIME type you checked, and show images through `<img>`.
+
 ### Windows
 
 `app.mainWindow()`, `app.windows()`, `app.createWindow(uri?)`, and on a `Window`:
-`load`, `evaluate`, `screenshot`, `bounds`, `setBounds`, `fullscreen`, `maximize`, `minimize`,
+`load`, `evaluate`, `provideFile`, `screenshot`, `bounds`, `setBounds`, `fullscreen`, `maximize`, `minimize`,
 `bringToFront`, `onClose`, `close`.
 
 Multi-window works the way Carlo's did — re-running the Chrome binary against the same profile, which

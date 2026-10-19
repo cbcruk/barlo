@@ -517,6 +517,18 @@ export class App {
     return window.isErr() ? window : window.unwrap().evaluate(script, ...args)
   }
 
+  /**
+   * Hands files on disk to a file input in the main window. See {@linkcode Window.provideFile}.
+   *
+   * @param selector A CSS selector for the input.
+   * @param paths Absolute paths of regular files.
+   * @returns Nothing once the input holds the files, or why it could not.
+   */
+  async provideFile(selector: string, paths: string[]): Promise<Result<void, EvaluateError>> {
+    const window = this.mainWindow()
+    return window.isErr() ? window : window.unwrap().provideFile(selector, paths)
+  }
+
   #onTargetDestroyed(targetId: string): void {
     const window = this.#windows.find(w => w.targetId === targetId)
     if (!window) return
