@@ -1,12 +1,17 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { after, before, describe, test } from 'node:test'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { gzipSync } from 'node:zlib'
 
 import type { Result } from 'better-result'
 
-import { ChromeNotFoundError, ProtocolError, launch, type App, type Window } from '../src/index'
-import { AppServer } from '../src/server'
+import { ChromeNotFoundError, ProtocolError, launch, type App, type Window } from '../src/index.ts'
+import { AppServer } from '../src/server.ts'
 
 /**
  * Unwraps a Result in a test, failing with the tagged error rather than a
@@ -71,7 +76,7 @@ const MAX_APP_CHROME = 60
 
 let app: App
 
-beforeAll(async () => {
+before(async () => {
   app = must(await launch({ width: 640, height: 480, title: 'Barlo Test', timeout: LAUNCH_TIMEOUT }))
   app.serveFolder(www)
   app.serveHandler(request =>
@@ -83,74 +88,74 @@ beforeAll(async () => {
     throw new Error('kaboom')
   })
   await app.load('index.html')
-}, 60_000)
+})
 
-afterAll(() => app?.exit())
+after(() => app?.exit())
 
 describe('window', () => {
   test('opens a real, non-headless window', async () => {
-    expect(must(await app.evaluate<string>('navigator.userAgent'))).not.toContain('Headless')
+    assert.ok(!must(await app.evaluate<string>('navigator.userAgent')).includes('Headless'))
   })
 
   test('runs in app mode with no browser chrome', async () => {
-    expect(must(await app.evaluate<number>('outerHeight - innerHeight'))).toBeLessThan(MAX_APP_CHROME)
+    assert.ok(must(await app.evaluate<number>('outerHeight - innerHeight')) < MAX_APP_CHROME)
   })
 
   test('honours the requested size', async () => {
-    expect(must(await app.evaluate<string>('[outerWidth, outerHeight].join("x")'))).toBe('640x480')
+    assert.equal(must(await app.evaluate<string>('[outerWidth, outerHeight].join("x")')), '640x480')
   })
 
   test('applies the configured title over the document title', async () => {
-    expect(must(await app.evaluate<string>('document.title'))).toBe('Barlo Test')
+    assert.equal(must(await app.evaluate<string>('document.title')), 'Barlo Test')
   })
 
   test('resizes via bounds', async () => {
     await must(app.mainWindow()).setBounds({ width: 900, height: 700 })
-    await Bun.sleep(300)
+    await sleep(300)
 
     const bounds = must(await must(app.mainWindow()).bounds())
-    expect(bounds.width).toBe(900)
-    expect(must(await app.evaluate<number>('outerWidth'))).toBe(900)
+    assert.equal(bounds.width, 900)
+    assert.equal(must(await app.evaluate<number>('outerWidth')), 900)
 
     // Height does not round-trip on macOS: asking for 700 yields 677, short by
     // the title bar, and both `bounds()` and `outerHeight` agree on 677. Every
     // other platform is exact, so the allowance is one title bar, not a range.
-    expect(700 - bounds.height).toBeGreaterThanOrEqual(0)
-    expect(700 - bounds.height).toBeLessThanOrEqual(30)
-    expect(must(await app.evaluate<number>('outerHeight'))).toBe(bounds.height)
+    assert.ok(700 - bounds.height >= 0)
+    assert.ok(700 - bounds.height <= 30)
+    assert.equal(must(await app.evaluate<number>('outerHeight')), bounds.height)
   })
 })
 
 describe('serving', () => {
   test('serves the folder', async () => {
-    expect(must(await app.evaluate<string>('document.getElementById("t").textContent'))).toBe('hello')
+    assert.equal(must(await app.evaluate<string>('document.getElementById("t").textContent')), 'hello')
   })
 
   test('navigates to another served file', async () => {
     await app.load('nested.html')
-    expect(must(await app.evaluate<string>('document.getElementById("n").textContent'))).toBe('nested')
+    assert.equal(must(await app.evaluate<string>('document.getElementById("n").textContent')), 'nested')
     await app.load('index.html')
   })
 
   test('serves an embedded file map', async () => {
-    expect(must(await app.evaluate<string>('fetch("/embedded/hi.txt").then(r => r.text())'))).toBe('embedded!')
+    assert.equal(must(await app.evaluate<string>('fetch("/embedded/hi.txt").then(r => r.text())')), 'embedded!')
   })
 
   test('falls through to a custom handler', async () => {
-    expect(must(await app.evaluate<string>('fetch("/api/ping").then(r => r.text())'))).toBe('pong')
+    assert.equal(must(await app.evaluate<string>('fetch("/api/ping").then(r => r.text())')), 'pong')
   })
 
   test('refuses paths escaping the served folder', async () => {
-    expect(must(await app.evaluate<number>('fetch("/../../etc/passwd").then(r => r.status)'))).toBe(404)
+    assert.equal(must(await app.evaluate<number>('fetch("/../../etc/passwd").then(r => r.status)')), 404)
   })
 })
 
 describe('serving failures', () => {
-  // Each of these used to reach the window as Bun's default error page. They
+  // Each of these used to reach the window as a runtime's error page. They
   // exercise AppServer directly: the behaviour is the server's, and a browser
   // per case would only add Chrome instances the suite does not need.
   test('a path that cannot be decoded is declined, not fatal', async () => {
-    expect(must(await app.evaluate<number>('fetch("/%ZZ").then(r => r.status)'))).toBe(404)
+    assert.equal(must(await app.evaluate<number>('fetch("/%ZZ").then(r => r.status)')), 404)
   })
 
   test('an upstream that is not listening falls through', async () => {
@@ -158,9 +163,9 @@ describe('serving failures', () => {
     // Nothing listens on port 1, which is the ordinary case for a dev-server
     // proxy started before its dev server.
     server.serveOrigin('http://127.0.0.1:1', '/proxy')
-    const origin = server.listen()
+    const origin = await server.listen()
     try {
-      expect((await fetch(`${origin}/proxy/x`)).status).toBe(404)
+      assert.equal((await fetch(`${origin}/proxy/x`)).status, 404)
     } finally {
       server.stop()
     }
@@ -171,12 +176,12 @@ describe('serving failures', () => {
     server.serveHandler(() => {
       throw new Error('handler bug')
     })
-    const origin = server.listen()
+    const origin = await server.listen()
     try {
       const response = await fetch(origin)
-      expect(response.status).toBe(500)
-      // Bun's default page is HTML with a stack trace in it.
-      expect(await response.text()).toBe('Internal error')
+      assert.equal(response.status, 500)
+      // Not an HTML error page with a stack trace in it.
+      assert.equal(await response.text(), 'Internal error')
     } finally {
       server.stop()
     }
@@ -185,10 +190,56 @@ describe('serving failures', () => {
   test('a malformed path reaches no route at all', async () => {
     const server = new AppServer()
     server.serveEmbedded({ 'index.html': 'hello' })
-    const origin = server.listen()
+    const origin = await server.listen()
     try {
-      expect((await fetch(`${origin}/%ZZ`)).status).toBe(404)
-      expect((await fetch(`${origin}/`)).status).toBe(200)
+      assert.equal((await fetch(`${origin}/%ZZ`)).status, 404)
+      assert.equal((await fetch(`${origin}/`)).status, 200)
+    } finally {
+      server.stop()
+    }
+  })
+})
+
+describe('serveOrigin', () => {
+  // A dev server stand-in that compresses its answers and echoes what reached it.
+  const upstream = createServer((request, response) => {
+    const chunks: Buffer[] = []
+    request.on('data', chunk => chunks.push(chunk))
+    request.on('end', () => {
+      const echoed = JSON.stringify({
+        method: request.method,
+        path: request.url,
+        host: request.headers.host,
+        body: Buffer.concat(chunks).toString(),
+      })
+      response.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' })
+      response.end(gzipSync(echoed))
+    })
+  })
+  let upstreamOrigin = ''
+  before(async () => {
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    upstreamOrigin = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`
+  })
+  after(() => {
+    upstream.close()
+    upstream.closeAllConnections()
+  })
+
+  test('forwards a streamed body and decodes the response once', async () => {
+    const server = new AppServer()
+    server.serveOrigin(upstreamOrigin, '/dev')
+    const origin = await server.listen()
+    try {
+      // Sent with `connection: keep-alive`, which Node's fetch refuses to forward.
+      const response = await fetch(`${origin}/dev/api?x=1`, { method: 'POST', body: 'payload' })
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), {
+        method: 'POST',
+        path: '/api?x=1',
+        host: new URL(upstreamOrigin).host,
+        body: 'payload',
+      })
     } finally {
       server.stop()
     }
@@ -197,54 +248,54 @@ describe('serving failures', () => {
 
 describe('exposeFunction', () => {
   test('round-trips arguments and return values', async () => {
-    expect(must(await app.evaluate<number>('add(2, 3)'))).toBe(5)
+    assert.equal(must(await app.evaluate<number>('add(2, 3)')), 5)
   })
 
   test('survives a reload', async () => {
     await app.load('index.html')
-    expect(must(await app.evaluate<number>('add(10, 20)'))).toBe(30)
+    assert.equal(must(await app.evaluate<number>('add(10, 20)')), 30)
   })
 
   test('propagates errors to the page', async () => {
-    expect(must(await app.evaluate<string>('boom().then(() => "no throw", e => e.message)'))).toBe('kaboom')
+    assert.equal(must(await app.evaluate<string>('boom().then(() => "no throw", e => e.message)')), 'kaboom')
   })
 
   test('exposes functions added after load', async () => {
     await app.exposeFunction('late', () => 'late-ok')
     await app.load('index.html')
-    expect(must(await app.evaluate<string>('late()'))).toBe('late-ok')
+    assert.equal(must(await app.evaluate<string>('late()')), 'late-ok')
   })
 
   test('accepts a serialized function with arguments', async () => {
-    expect(must(await app.evaluate((a: number, b: number) => a * b, 6, 7))).toBe(42)
+    assert.equal(must(await app.evaluate((a: number, b: number) => a * b, 6, 7)), 42)
   })
 })
 
 describe('shadowing', () => {
   // Reported from ports-cli, where a page's own `async function kill` replaced
-  // the exposed `kill` and the button called the page back instead of Bun.
+  // the exposed `kill` and the button called the page back instead of Node.
   test('reports an exposed name the page declares over', async () => {
     await app.load('shadow.html')
-    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual(['add'])
+    assert.deepEqual(must(await must(app.mainWindow()).shadowedFunctions()), ['add'])
     // The page really did take it over, which is what makes this silent.
-    expect(must(await app.evaluate<string>('add(1, 2)'))).toBe('page')
+    assert.equal(must(await app.evaluate<string>('add(1, 2)')), 'page')
   })
 
   test('stays quiet when the page wraps its script', async () => {
     await app.load('wrapped.html')
-    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual([])
-    expect(must(await app.evaluate<number>('add(1, 2)'))).toBe(3)
+    assert.deepEqual(must(await must(app.mainWindow()).shadowedFunctions()), [])
+    assert.equal(must(await app.evaluate<number>('add(1, 2)')), 3)
   })
 
   test('stays quiet for a module script, whose declarations are scoped', async () => {
     await app.load('module.html')
-    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual([])
-    expect(must(await app.evaluate<number>('add(1, 2)'))).toBe(3)
+    assert.deepEqual(must(await must(app.mainWindow()).shadowedFunctions()), [])
+    assert.equal(must(await app.evaluate<number>('add(1, 2)')), 3)
   })
 
   test('a reload reinstalls the bridge over the page', async () => {
     await app.load('index.html')
-    expect(must(await must(app.mainWindow()).shadowedFunctions())).toEqual([])
+    assert.deepEqual(must(await must(app.mainWindow()).shadowedFunctions()), [])
   })
 })
 
@@ -252,17 +303,17 @@ describe('multiple windows', () => {
   test('opens a second app window and keeps the bridge working', async () => {
     const second = must(await app.createWindow('nested.html'))
     try {
-      expect(app.windows().length).toBe(2)
-      expect(must(await second.evaluate<string>('document.getElementById("n").textContent'))).toBe('nested')
-      expect(must(await second.evaluate<number>('add(4, 5)'))).toBe(9)
-      expect(must(await second.evaluate<number>('outerHeight - innerHeight'))).toBeLessThan(MAX_APP_CHROME)
+      assert.equal(app.windows().length, 2)
+      assert.equal(must(await second.evaluate<string>('document.getElementById("n").textContent')), 'nested')
+      assert.equal(must(await second.evaluate<number>('add(4, 5)')), 9)
+      assert.ok(must(await second.evaluate<number>('outerHeight - innerHeight')) < MAX_APP_CHROME)
       // The main window is untouched.
-      expect(must(await app.evaluate<string>('document.getElementById("t").textContent'))).toBe('hello')
+      assert.equal(must(await app.evaluate<string>('document.getElementById("t").textContent')), 'hello')
     } finally {
       await second.close()
     }
-    expect(app.windows().length).toBe(1)
-  }, 60_000)
+    assert.equal(app.windows().length, 1)
+  })
 })
 
 describe('provideFile', () => {
@@ -277,102 +328,104 @@ describe('provideFile', () => {
         return { name: file.name, size: file.size, first: bytes[0], events: (globalThis as any).events }
       }),
     )
-    expect(read).toEqual({
+    assert.deepEqual(read, {
       name: 'big.bin',
       size: 16 * 1024 * 1024,
       first: 7,
       events: ['input', 'change'],
     })
-    expect(performance.now() - started).toBeLessThan(5_000)
+    assert.ok(performance.now() - started < 5_000)
   })
 
   test('refuses paths Chrome would accept but cannot read', async () => {
     must(await app.load('picker.html'))
     for (const paths of [['big.bin'], [join(www, 'missing.bin')], [www]]) {
       const result = await app.provideFile('#pick', paths)
-      expect(result.isErr()).toBe(true)
-      if (result.isErr()) expect(result.error._tag).toBe('EvaluationError')
+      assert.equal(result.isErr(), true)
+      if (result.isErr()) assert.equal(result.error._tag, 'EvaluationError')
     }
-    expect(must(await app.evaluate<number>('pick.files.length'))).toBe(0)
+    assert.equal(must(await app.evaluate<number>('pick.files.length')), 0)
     // The window still works afterwards, which a relative path used to break.
     must(await app.load('index.html'))
   })
 
   test('gives several files only to an input that takes several', async () => {
     must(await app.load('picker.html'))
-    expect((await app.provideFile('#pick', [bigFile, bigFile])).isErr()).toBe(true)
+    assert.equal((await app.provideFile('#pick', [bigFile, bigFile])).isErr(), true)
     must(await app.provideFile('#many', [bigFile, join(www, 'index.html')]))
-    expect(must(await app.evaluate<number>('many.files.length'))).toBe(2)
+    assert.equal(must(await app.evaluate<number>('many.files.length')), 2)
   })
 
   test('refuses an element that is not a file input', async () => {
     must(await app.load('picker.html'))
     for (const selector of ['#not-an-input', '#missing', '!!not a selector']) {
       const result = await app.provideFile(selector, [bigFile])
-      expect(result.isErr()).toBe(true)
-      if (result.isErr()) expect(result.error._tag).toBe('EvaluationError')
+      assert.equal(result.isErr(), true)
+      if (result.isErr()) assert.equal(result.error._tag, 'EvaluationError')
     }
   })
 })
 
 describe('the bridge answers only its own origin', () => {
-  // Counts calls that reached Bun at all, since a foreign frame getting no
+  // Counts calls that reached Node at all, since a foreign frame getting no
   // answer is not enough: the function must not have run.
   let probed = 0
-  beforeAll(async () => {
+  before(async () => {
     must(await app.exposeFunction('probe', () => ++probed))
   })
 
   // A second origin on another port. Its page tries the bridge and reports
   // whether it got an answer, which is what an HTML preview or an embedded
   // remote page would be able to do.
-  const foreign = Bun.serve({
-    port: 0,
-    hostname: '127.0.0.1',
-    fetch: request => {
-      // An app-origin page holding a file input, framed by a foreign top document.
-      const app = new URL(request.url).searchParams.get('app')
-      if (app) {
-        return new Response(`<!doctype html><iframe src="${app}/picker.html"></iframe>`, {
-          headers: { 'content-type': 'text/html' },
-        })
-      }
-      return new Response(
-        `<!doctype html><script>
-          const answer = Promise.race([
-            probe(),
-            new Promise(resolve => setTimeout(() => resolve('ignored'), 500)),
-          ])
-          answer.then(value => parent !== window && parent.postMessage(value, '*'))
-          globalThis.answer = answer
-        </script>`,
-        { headers: { 'content-type': 'text/html' } },
-      )
-    },
+  const foreign = createServer((request, response) => {
+    response.setHeader('content-type', 'text/html')
+    // An app-origin page holding a file input, framed by a foreign top document.
+    const app = new URL(request.url ?? '/', 'http://localhost').searchParams.get('app')
+    if (app) {
+      response.end(`<!doctype html><iframe src="${app}/picker.html"></iframe>`)
+      return
+    }
+    response.end(
+      `<!doctype html><script>
+        const answer = Promise.race([
+          probe(),
+          new Promise(resolve => setTimeout(() => resolve('ignored'), 500)),
+        ])
+        answer.then(value => parent !== window && parent.postMessage(value, '*'))
+        globalThis.answer = answer
+      </script>`,
+    )
   })
-  afterAll(() => foreign.stop(true))
+  let foreignOrigin = ''
+  before(async () => {
+    await new Promise<void>(resolve => foreign.listen(0, '127.0.0.1', resolve))
+    foreignOrigin = `http://127.0.0.1:${(foreign.address() as AddressInfo).port}`
+  })
+  after(() => {
+    foreign.close()
+    foreign.closeAllConnections()
+  })
 
   async function waitForOrigin(origin: string): Promise<void> {
     const deadline = Date.now() + 10_000
     while (Date.now() < deadline) {
       const now = await app.evaluate<string>('location.origin + " " + document.readyState')
       if (now.isOk() && now.unwrap() === `${origin} complete`) return
-      await Bun.sleep(50)
+      await sleep(50)
     }
     throw new Error(`the window never reached ${origin}`)
   }
 
   test('a window navigated off-origin by the page gets no answers', async () => {
-    const foreignOrigin = foreign.url.origin
     await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/`)}`)
     await waitForOrigin(foreignOrigin)
     try {
-      expect(must(await app.evaluate<string>('answer'))).toBe('ignored')
+      assert.equal(must(await app.evaluate<string>('answer')), 'ignored')
     } finally {
       must(await app.load('index.html'))
     }
-    expect(probed).toBe(0)
-    expect(must(await app.evaluate<number>('probe()'))).toBe(1)
+    assert.equal(probed, 0)
+    assert.equal(must(await app.evaluate<number>('probe()')), 1)
     probed = 0
   })
 
@@ -383,21 +436,20 @@ describe('the bridge answers only its own origin', () => {
           addEventListener('message', event => resolve(event.data), { once: true })
           document.body.append(Object.assign(document.createElement('iframe'), { src }))
         }),
-      `${foreign.url.origin}/`,
+      `${foreignOrigin}/`,
     )
-    expect(must(answer)).toBe('ignored')
-    expect(probed).toBe(0)
+    assert.equal(must(answer), 'ignored')
+    assert.equal(probed, 0)
   })
 
   test('provideFile gives nothing to a window that navigated off-origin', async () => {
-    const foreignOrigin = foreign.url.origin
     await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/`)}`)
     await waitForOrigin(foreignOrigin)
     try {
       must(await app.evaluate(() => document.body.append(Object.assign(document.createElement('input'), { type: 'file', id: 'pick' }))))
       const result = await app.provideFile('#pick', [bigFile])
-      expect(result.isErr()).toBe(true)
-      expect(must(await app.evaluate<number>('document.getElementById("pick").files.length'))).toBe(0)
+      assert.equal(result.isErr(), true)
+      assert.equal(must(await app.evaluate<number>('document.getElementById("pick").files.length')), 0)
     } finally {
       must(await app.load('index.html'))
     }
@@ -405,18 +457,17 @@ describe('the bridge answers only its own origin', () => {
 
   test('provideFile ignores an app-origin frame inside a foreign page', async () => {
     const appOrigin = must(await app.evaluate<string>('location.origin'))
-    const foreignOrigin = foreign.url.origin
     await app.evaluate(`location.href = ${JSON.stringify(`${foreignOrigin}/?app=${appOrigin}`)}`)
     await waitForOrigin(foreignOrigin)
     try {
       const deadline = Date.now() + 10_000
       while (!must(await app.evaluate<boolean>('frames.length > 0'))) {
         if (Date.now() > deadline) throw new Error('the frame never appeared')
-        await Bun.sleep(50)
+        await sleep(50)
       }
       // The frame's own document loads after its element appears.
-      await Bun.sleep(500)
-      expect((await app.provideFile('#pick', [bigFile])).isErr()).toBe(true)
+      await sleep(500)
+      assert.equal((await app.provideFile('#pick', [bigFile])).isErr(), true)
     } finally {
       must(await app.load('index.html'))
     }
@@ -430,18 +481,18 @@ describe('the bridge answers only its own origin', () => {
           frame.onload = () => resolve(true)
           document.body.append(frame)
         }),
-      `${foreign.url.origin}/`,
+      `${foreignOrigin}/`,
     )
-    expect(must(framed)).toBe(true)
+    assert.equal(must(framed), true)
     const result = await app.provideFile('input[type=file]', [bigFile])
-    expect(result.isErr()).toBe(true)
+    assert.equal(result.isErr(), true)
   })
 
   test('createWindow refuses to open off-origin', async () => {
-    const result = await app.createWindow(`${foreign.url.origin}/`)
-    expect(result.isErr()).toBe(true)
-    if (result.isErr()) expect(result.error._tag).toBe('NavigationError')
-    expect(app.windows().length).toBe(1)
+    const result = await app.createWindow(`${foreignOrigin}/`)
+    assert.equal(result.isErr(), true)
+    if (result.isErr()) assert.equal(result.error._tag, 'NavigationError')
+    assert.equal(app.windows().length, 1)
   })
 })
 
@@ -451,65 +502,63 @@ describe('scoped disposal', () => {
     {
       await using scoped = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
       seen = scoped
-      expect(scoped.exited).toBe(false)
-      expect(scoped.windows().length).toBe(1)
+      assert.equal(scoped.exited, false)
+      assert.equal(scoped.windows().length, 1)
     }
-    expect(seen.exited).toBe(true)
-    expect(seen.windows().length).toBe(0)
-  }, 60_000)
+    assert.equal(seen.exited, true)
+    assert.equal(seen.windows().length, 0)
+  })
 
   test('await using exits the app even when the block throws', async () => {
     let seen: App | undefined
-    await expect(
-      (async () => {
+    await assert.rejects((async () => {
         await using scoped = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
         seen = scoped
         throw new Error('boom')
-      })(),
-    ).rejects.toThrow('boom')
-    expect(seen!.exited).toBe(true)
-  }, 60_000)
+      })(), { message: 'boom' })
+    assert.equal(seen!.exited, true)
+  })
 
   test('await using closes a window without exiting its app', async () => {
     let closed: Window | undefined
     {
       await using second = must(await app.createWindow('nested.html'))
       closed = second
-      expect(app.windows().length).toBe(2)
+      assert.equal(app.windows().length, 2)
     }
-    expect(closed.closed).toBe(true)
-    expect(app.windows().length).toBe(1)
-    expect(app.exited).toBe(false)
-  }, 60_000)
+    assert.equal(closed.closed, true)
+    assert.equal(app.windows().length, 1)
+    assert.equal(app.exited, false)
+  })
 })
 
 describe('failures are values', () => {
   test('a page-side throw comes back as EvaluationError', async () => {
     const result = await app.evaluate('throw new TypeError("nope")')
-    expect(result.isErr()).toBe(true)
+    assert.equal(result.isErr(), true)
     if (result.isErr()) {
-      expect(result.error._tag).toBe('EvaluationError')
-      expect(result.error.message).toContain('nope')
+      assert.equal(result.error._tag, 'EvaluationError')
+      assert.ok(result.error.message.includes('nope'))
     }
   })
 
   test('an unfindable browser comes back as ChromeNotFoundError', async () => {
     const result = await launch({ executablePath: '/nonexistent/chrome' })
-    expect(result.isErr()).toBe(true)
+    assert.equal(result.isErr(), true)
     if (result.isErr()) {
-      expect(result.error._tag).toBe('ChromeNotFoundError')
-      expect(ChromeNotFoundError.is(result.error)).toBe(true)
+      assert.equal(result.error._tag, 'ChromeNotFoundError')
+      assert.equal(ChromeNotFoundError.is(result.error), true)
     }
-  }, 60_000)
+  })
 
   test('operating on a closed app reports WindowClosedError', async () => {
     const solo = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
     solo.exit()
 
     const result = await solo.evaluate('1 + 1')
-    expect(result.isErr()).toBe(true)
-    if (result.isErr()) expect(result.error._tag).toBe('WindowClosedError')
-  }, 60_000)
+    assert.equal(result.isErr(), true)
+    if (result.isErr()) assert.equal(result.error._tag, 'WindowClosedError')
+  })
 
   test('errors match exhaustively by tag', async () => {
     const result = await launch({ executablePath: '/nonexistent/chrome' })
@@ -523,8 +572,8 @@ describe('failures are values', () => {
           ProtocolError: () => 'chrome refused a command',
         }),
     })
-    expect(described).toBe('no browser')
-  }, 60_000)
+    assert.equal(described, 'no browser')
+  })
 })
 
 describe('inputs that used to escape as exceptions', () => {
@@ -539,8 +588,8 @@ describe('inputs that used to escape as exceptions', () => {
     const outcome = must(
       await app.evaluate<string>('cyclic().then(() => "resolved", e => "rejected: " + e.message)'),
     )
-    expect(outcome).toContain('rejected:')
-    expect(outcome).toContain('could not send the result back')
+    assert.ok(outcome.includes('rejected:'))
+    assert.ok(outcome.includes('could not send the result back'))
   })
 
   test('a cyclic argument to evaluate is an error, not a throw', async () => {
@@ -548,8 +597,8 @@ describe('inputs that used to escape as exceptions', () => {
     cyclic['self'] = cyclic
 
     const result = await app.evaluate((x: unknown) => x, cyclic)
-    expect(result.isErr()).toBe(true)
-    if (result.isErr()) expect(result.error._tag).toBe('EvaluationError')
+    assert.equal(result.isErr(), true)
+    if (result.isErr()) assert.equal(result.error._tag, 'EvaluationError')
   })
 
   test('cyclic CDP params are an error, not a throw', async () => {
@@ -557,8 +606,8 @@ describe('inputs that used to escape as exceptions', () => {
     cyclic['self'] = cyclic
 
     const sent = await must(app.mainWindow()).session.send('Runtime.evaluate', cyclic)
-    expect(sent.isErr()).toBe(true)
-    if (sent.isErr()) expect(sent.error._tag).toBe('ProtocolError')
+    assert.equal(sent.isErr(), true)
+    if (sent.isErr()) assert.equal(sent.error._tag, 'ProtocolError')
   })
 
   test('load refuses to leave the application origin', async () => {
@@ -567,24 +616,24 @@ describe('inputs that used to escape as exceptions', () => {
     const before = must(await app.evaluate<string>('location.origin'))
 
     const result = await app.load('http://example.com/evil')
-    expect(result.isErr()).toBe(true)
-    if (result.isErr()) expect(result.error._tag).toBe('NavigationError')
-    expect(must(await app.evaluate<string>('location.origin'))).toBe(before)
+    assert.equal(result.isErr(), true)
+    if (result.isErr()) assert.equal(result.error._tag, 'NavigationError')
+    assert.equal(must(await app.evaluate<string>('location.origin')), before)
   })
 
   test('a relative path with odd characters still loads', async () => {
     // Refusing off-origin must not refuse the ordinary.
-    expect((await app.load('index.html', { q: 'a b&c' })).isOk()).toBe(true)
-    expect(must(await app.evaluate<string>('location.search'))).toContain('a+b%26c')
+    assert.equal((await app.load('index.html', { q: 'a b&c' })).isOk(), true)
+    assert.ok(must(await app.evaluate<string>('location.search')).includes('a+b%26c'))
   })
 })
 
 describe('the protocol layer', () => {
   test('a refused CDP command comes back as ProtocolError naming the method', async () => {
     const sent = await must(app.mainWindow()).session.send('NoSuch.method')
-    expect(sent.isErr()).toBe(true)
+    assert.equal(sent.isErr(), true)
     if (sent.isErr() && ProtocolError.is(sent.error)) {
-      expect(sent.error.method).toBe('NoSuch.method')
+      assert.equal(sent.error.method, 'NoSuch.method')
     } else {
       throw new Error('expected a ProtocolError')
     }
@@ -596,18 +645,18 @@ describe('the protocol layer', () => {
     solo.exit()
 
     const sent = await session.send('Runtime.evaluate', { expression: '1' })
-    expect(sent.isErr()).toBe(true)
-    if (sent.isErr()) expect(sent.error._tag).toBe('BrowserGoneError')
-  }, 60_000)
+    assert.equal(sent.isErr(), true)
+    if (sent.isErr()) assert.equal(sent.error._tag, 'BrowserGoneError')
+  })
 
   test('exposeFunction reports a window it could not reach', async () => {
     const solo = must(await launch({ width: 400, height: 300, timeout: LAUNCH_TIMEOUT }))
     solo.exit()
 
     const exposed = await solo.exposeFunction('late', () => 1)
-    expect(exposed.isErr()).toBe(true)
-    if (exposed.isErr()) expect(exposed.error._tag).toBe('BrowserGoneError')
-  }, 60_000)
+    assert.equal(exposed.isErr(), true)
+    if (exposed.isErr()) assert.equal(exposed.error._tag, 'BrowserGoneError')
+  })
 })
 
 describe('lifecycle', () => {
@@ -616,7 +665,7 @@ describe('lifecycle', () => {
     let exited = false
     solo.onExit(() => (exited = true))
     solo.exit()
-    expect(exited).toBe(true)
-    expect(solo.exited).toBe(true)
-  }, 60_000)
+    assert.equal(exited, true)
+    assert.equal(solo.exited, true)
+  })
 })

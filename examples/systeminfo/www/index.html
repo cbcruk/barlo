@@ -12,7 +12,7 @@
 <h1>System Info</h1>
 <dl id="out"></dl>
 <script type="module">
-  // `systemInfo` was exposed from Bun; it arrives as a plain async function.
+  // `systemInfo` was exposed from Node; it arrives as a plain async function.
   const info = await window.systemInfo()
   document.getElementById('out').innerHTML = Object.entries(info)
     .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`)

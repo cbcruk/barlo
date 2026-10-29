@@ -97,7 +97,7 @@ supports it, type-check the example blocks (`deno test --doc`) and lint public
 symbols for missing comments and return types (`deno doc --lint`) before
 publishing.
 
-In this repo that check is `bun run docs:check` (`scripts/doccheck.ts`): it
+In this repo that check is `npm run docs:check` (`scripts/doccheck.ts`): it
 fails on any exported symbol without a JSDoc block, and type-checks every
 `@example` block as its own module. An example missing its `import` therefore
 fails the build rather than merely reading badly.
@@ -119,5 +119,5 @@ supports them before use:
   Keep `@example` titles short — they read as a plain line in editor tooltips.
 - `@template` is the tag to use for type parameters, matching what the repo
   already writes.
-- Verify with `bun run docs:check`, `bunx tsc --noEmit`, and `bun test` in the
+- Verify with `npm run docs:check`, `npm run typecheck`, and `npm test` in the
   same change.

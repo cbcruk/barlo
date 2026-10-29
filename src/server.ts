@@ -1,5 +1,5 @@
 /**
- * The application's HTTP origin, backing Carlo's serving API on `Bun.serve`.
+ * The application's HTTP origin, backing Carlo's serving API on `node:http`.
  *
  * Routes are consulted longest-prefix first, and a handler that returns
  * `undefined` falls through to the next one, so a broad
@@ -11,8 +11,13 @@
  */
 
 import { Result } from 'better-result'
+import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { join, normalize, resolve, sep } from 'node:path'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { extname, join, normalize, resolve, sep } from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 /**
  * Reserved path serving a blank page, which Chrome opens at launch.
@@ -75,10 +80,19 @@ function folderHandler(folder: string, prefix: string): RequestHandler {
     const candidates = isDirectory ? [target, join(target, 'index.html')] : [target]
 
     for (const candidate of candidates) {
-      const file = Bun.file(candidate)
       // An unreadable file is one this route cannot serve, same as a missing one.
-      const exists = (await Result.tryPromise(() => file.exists())).unwrapOr(false)
-      if (exists) return new Response(file)
+      const found = await Result.tryPromise(() => stat(candidate))
+      if (found.isErr() || !found.value.isFile()) continue
+
+      // Module scripts are refused without a JavaScript MIME type, so the type
+      // is inferred here as it is for embedded files.
+      const body = Readable.toWeb(createReadStream(candidate)) as ReadableStream
+      return new Response(body, {
+        headers: {
+          'content-type': mimeType(candidate),
+          'content-length': String(found.value.size),
+        },
+      })
     }
     return undefined
   }
@@ -98,17 +112,40 @@ function originHandler(base: string, prefix: string): RequestHandler {
     const proxied = await Result.tryPromise(() =>
       fetch(upstream, {
         method: request.method,
-        headers: request.headers,
+        headers: forwardable(request.headers),
         body: request.body,
-        // @ts-expect-error -- Bun supports duplex for streaming request bodies
+        // Required by Node's fetch for a streamed request body.
         duplex: 'half',
-      }),
+      } as RequestInit),
     )
     if (proxied.isErr()) return undefined
 
     const response = proxied.unwrap()
-    return response.ok || response.status < 500 ? response : undefined
+    if (!response.ok && response.status >= 500) return undefined
+
+    // fetch has already decompressed the body, so the upstream's encoding and
+    // length no longer describe it; passed on, the window would decode twice.
+    const headers = new Headers(response.headers)
+    headers.delete('content-encoding')
+    headers.delete('content-length')
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    })
   }
+}
+
+/**
+ * Headers that describe one connection rather than the request, which Node's
+ * fetch refuses outright, plus `host`, which must name the upstream.
+ */
+const HOP_BY_HOP = ['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'host', 'te', 'trailer']
+
+function forwardable(headers: Headers): Headers {
+  const copy = new Headers(headers)
+  for (const name of HOP_BY_HOP) copy.delete(name)
+  return copy
 }
 
 /**
@@ -132,8 +169,26 @@ const MIME: Record<string, string> = {
   jpeg: 'image/jpeg',
   gif: 'image/gif',
   webp: 'image/webp',
+  ico: 'image/x-icon',
+  avif: 'image/avif',
+  woff: 'font/woff',
   woff2: 'font/woff2',
+  ttf: 'font/ttf',
+  otf: 'font/otf',
   wasm: 'application/wasm',
+  map: 'application/json; charset=utf-8',
+  txt: 'text/plain; charset=utf-8',
+  xml: 'application/xml',
+  pdf: 'application/pdf',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+}
+
+function mimeType(path: string): string {
+  return MIME[extname(path).slice(1).toLowerCase()] ?? 'application/octet-stream'
 }
 
 function embeddedHandler(files: EmbeddedFiles, prefix: string): RequestHandler {
@@ -149,8 +204,7 @@ function embeddedHandler(files: EmbeddedFiles, prefix: string): RequestHandler {
     const body = table.get(key) ?? table.get(`${key}/index.html`.replace(/^\//, ''))
     if (body === undefined) return undefined
 
-    const type = MIME[key.split('.').pop() ?? ''] ?? 'application/octet-stream'
-    return new Response(body as BodyInit, { headers: { 'content-type': type } })
+    return new Response(body as BodyInit, { headers: { 'content-type': mimeType(key) } })
   }
 }
 
@@ -163,7 +217,9 @@ function embeddedHandler(files: EmbeddedFiles, prefix: string): RequestHandler {
  */
 export class AppServer {
   #routes: Route[] = []
-  #server: ReturnType<typeof Bun.serve> | undefined
+  #server: Server | undefined
+  #port = 0
+  #listening: Promise<string> | undefined
 
   /**
    * Serves files from a folder on disk.
@@ -172,9 +228,9 @@ export class AppServer {
    * resolve outside the folder are declined rather than served, so `..`
    * traversal cannot escape.
    *
-   * > This reads from disk at request time and therefore does **not** survive
-   * > `bun build --compile`, where no folder sits beside the binary. Use
-   * > {@linkcode AppServer.serveEmbedded} for compiled applications.
+   * Content types are inferred from the extension, as for
+   * {@linkcode AppServer.serveEmbedded}, and files are streamed rather than
+   * read into memory.
    *
    * @param folder Path to the folder, resolved against the working directory.
    * @param prefix URL prefix to mount it under.
@@ -213,25 +269,12 @@ export class AppServer {
   /**
    * Serves an in-memory file table.
    *
-   * The contents live in the bundle rather than on disk, which is what makes
-   * this the serving method that survives `bun build --compile`.
+   * The contents live in memory rather than on disk, which suits pages
+   * generated at runtime or inlined by a bundler. See
+   * {@linkcode App.serveEmbedded} for an example.
    *
    * @param files The paths to serve and their contents.
    * @param prefix URL prefix to mount them under.
-   *
-   * @example Embedding a page into a compiled binary
-   * ```ts
-   * import { launch } from "barlo";
-   * import index from "./www/index.html" with { type: "text" };
-   *
-   * const app = (await launch()).unwrap();
-   *
-   * app.serveEmbedded({ "index.html": index as unknown as string });
-   * await app.load("index.html");
-   * ```
-   *
-   * The cast is needed only because Bun types every `.html` import as an
-   * `HTMLBundle` for its bundler.
    */
   serveEmbedded(files: EmbeddedFiles, prefix = '/'): void {
     const normalized = normalizePrefix(prefix)
@@ -273,45 +316,74 @@ export class AppServer {
    * request.
    *
    * @returns The origin now being served, such as `"http://127.0.0.1:53124"`.
+   * Rejects when the port cannot be bound.
    */
-  listen(): string {
-    if (this.#server) return this.origin
+  listen(): Promise<string> {
+    this.#listening ??= this.#bind().catch((cause: unknown) => {
+      this.#listening = undefined
+      throw cause
+    })
+    return this.#listening
+  }
+
+  async #bind(): Promise<string> {
+    const server = createServer((req, res) => void this.#serve(req, res))
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject)
+        resolve()
+      })
+    })
+    this.#server = server
+    this.#port = (server.address() as AddressInfo).port
+    return this.origin
+  }
+
+  async #serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // A window that goes away mid-response aborts whatever is still producing
+    // it, such as a proxied upstream request.
+    const controller = new AbortController()
+    res.once('close', () => {
+      if (!res.writableFinished) controller.abort()
+    })
+
+    const request = Result.try(() => toRequest(req, this.origin, controller.signal))
+    const response = request.isOk()
+      ? await this.#respond(request.value)
+      : new Response('Bad request', { status: 400 })
+    await send(response, req, res)
+  }
+
+  async #respond(request: Request): Promise<Response> {
+    // Chrome needs somewhere to land before the app registers its routes.
+    if (new URL(request.url).pathname === BLANK_PATH)
+      return new Response('<!doctype html><meta charset=utf-8><title></title>', {
+        headers: { 'content-type': 'text/html' },
+      })
 
     // Later routes are more specific, and longer prefixes should win.
-    const ordered = () => [...this.#routes].sort((a, b) => b.prefix.length - a.prefix.length)
+    const ordered = [...this.#routes].sort((a, b) => b.prefix.length - a.prefix.length)
 
-    this.#server = Bun.serve({
-      port: 0,
-      hostname: '127.0.0.1',
-      fetch: async request => {
-        // Chrome needs somewhere to land before the app registers its routes.
-        if (new URL(request.url).pathname === BLANK_PATH)
-          return new Response('<!doctype html><meta charset=utf-8><title></title>', {
-            headers: { 'content-type': 'text/html' },
-          })
-
-        for (const route of ordered()) {
-          const handled = await Result.tryPromise({
-            try: async () => route.handle(request),
-            catch: (cause) => cause,
-          })
-          if (handled.isErr()) {
-            // A handler that throws is a bug in the handler, not a decline.
-            // Saying so beats Bun's default error page, which puts a stack
-            // trace in the window.
-            console.error(
-              `barlo: the handler for ${route.prefix} threw on ${request.url}:`,
-              handled.error,
-            )
-            return new Response('Internal error', { status: 500 })
-          }
-          const response = handled.unwrap()
-          if (response) return response
-        }
-        return new Response('Not found', { status: 404 })
-      },
-    })
-    return this.origin
+    for (const route of ordered) {
+      const handled = await Result.tryPromise({
+        try: async () => route.handle(request),
+        catch: (cause) => cause,
+      })
+      if (handled.isErr()) {
+        // A handler that throws is a bug in the handler, not a decline. Saying
+        // so beats a dropped connection, which leaves the window on an error
+        // page with no clue which handler failed.
+        console.error(
+          `barlo: the handler for ${route.prefix} threw on ${request.url}:`,
+          handled.error,
+        )
+        return new Response('Internal error', { status: 500 })
+      }
+      const response = handled.unwrap()
+      if (response) return response
+    }
+    return new Response('Not found', { status: 404 })
   }
 
   /**
@@ -325,7 +397,7 @@ export class AppServer {
    */
   get origin(): string {
     if (!this.#server) throw new Error('Server is not listening')
-    return `http://127.0.0.1:${this.#server.port}`
+    return `http://127.0.0.1:${this.#port}`
   }
 
   /**
@@ -337,7 +409,66 @@ export class AppServer {
   stop(): void {
     // Nothing useful follows a server that will not stop; it is going away.
     const server = this.#server
-    if (server) Result.try({ try: () => server.stop(true), catch: () => undefined })
+    if (server) {
+      Result.try({
+        try: () => {
+          server.close()
+          server.closeAllConnections()
+        },
+        catch: () => undefined,
+      })
+    }
     this.#server = undefined
+    this.#listening = undefined
   }
+}
+
+/**
+ * Converts Node's request into a fetch `Request`, which is what route handlers
+ * take.
+ *
+ * The URL is joined rather than resolved: `new URL("//host/x", origin)` would
+ * read the path as another host.
+ */
+function toRequest(req: IncomingMessage, origin: string, signal: AbortSignal): Request {
+  const headers = new Headers()
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue
+    for (const one of Array.isArray(value) ? value : [value]) headers.append(name, one)
+  }
+  const method = req.method ?? 'GET'
+  const hasBody = method !== 'GET' && method !== 'HEAD'
+  return new Request(new URL(`${origin}${req.url ?? '/'}`), {
+    method,
+    headers,
+    signal,
+    body: hasBody ? (Readable.toWeb(req) as ReadableStream) : undefined,
+    // Required by Node's fetch for a streamed request body.
+    duplex: 'half',
+  } as RequestInit)
+}
+
+/** Writes a fetch `Response` out through Node's response. */
+async function send(response: Response, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const headers: Record<string, string | string[]> = {}
+  response.headers.forEach((value, name) => {
+    if (name !== 'set-cookie') headers[name] = value
+  })
+  // Several cookies cannot share one header line, so they go out as a list.
+  const cookies = response.headers.getSetCookie()
+  if (cookies.length > 0) headers['set-cookie'] = cookies
+
+  if (response.statusText) res.writeHead(response.status, response.statusText, headers)
+  else res.writeHead(response.status, headers)
+
+  if (!response.body || req.method === 'HEAD') {
+    await response.body?.cancel()
+    res.end()
+    return
+  }
+  // A window that navigates away mid-response closes the socket. That ends
+  // this response, not the server, so the broken pipe is not an error.
+  await Result.tryPromise(() =>
+    pipeline(Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]), res),
+  )
 }

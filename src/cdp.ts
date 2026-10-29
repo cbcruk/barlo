@@ -1,7 +1,7 @@
 /**
  * Minimal Chrome DevTools Protocol client over a WebSocket.
  *
- * Carlo leaned on Puppeteer for this; Bun ships a WebSocket client, so the
+ * Carlo leaned on Puppeteer for this; Node ships a WebSocket client, so the
  * whole transport is a few dozen lines and barlo stays dependency-free.
  *
  * Sessions are flattened: one socket carries the browser-level connection and
@@ -13,7 +13,7 @@
 
 import { Result } from 'better-result'
 
-import { BrowserGoneError, ProtocolError } from './errors'
+import { BrowserGoneError, ProtocolError } from './errors.ts'
 
 /** What a CDP command can fail with. */
 export type SendError = ProtocolError | BrowserGoneError

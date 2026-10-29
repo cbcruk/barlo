@@ -12,7 +12,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { ChromeNotFoundError } from './errors'
+import { ChromeNotFoundError } from './errors.ts'
 
 const DARWIN = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
