@@ -1,5 +1,5 @@
 /**
- * The Bun-to-page bridge behind {@linkcode App.exposeFunction}.
+ * The Node-to-page bridge behind {@linkcode App.exposeFunction}.
  *
  * A CDP binding gives the page one synchronous channel out; every call is
  * tagged with a sequence number so replies can be routed back to the right
@@ -16,14 +16,14 @@ import { Result } from 'better-result'
  * Name of the CDP binding installed with `Runtime.addBinding`.
  *
  * The page calls it with a JSON-encoded {@linkcode RpcCall}; Chrome forwards
- * that to Bun as a `Runtime.bindingCalled` event.
+ * that to Node as a `Runtime.bindingCalled` event.
  */
 export const BINDING = '__barlo_rpc__'
 
 /**
  * Name of the page-side global that settles a pending call.
  *
- * Bun invokes it through `Runtime.evaluate` with the expression built by
+ * Node invokes it through `Runtime.evaluate` with the expression built by
  * {@linkcode resolverExpression}.
  */
 export const RESOLVER = '__barlo_resolve__'
@@ -45,7 +45,7 @@ export const CHANNEL = '__barlo_call__'
  */
 export const REGISTRY = '__barlo_installed__'
 
-/** One call from the page to a function exposed on the Bun side. */
+/** One call from the page to a function exposed on the Node side. */
 export interface RpcCall {
   /** Sequence number, unique per document, used to match the reply. */
   id: number
@@ -102,7 +102,7 @@ export function bootstrapSource(names: Iterable<string>): string {
 }
 
 /**
- * Builds the expression that settles a page-side call once Bun has an answer.
+ * Builds the expression that settles a page-side call once Node has an answer.
  *
  * Rejections travel as a message string rather than an `Error`, because only
  * JSON survives the CDP hop; the page reconstructs an `Error` from it.

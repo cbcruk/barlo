@@ -1,6 +1,6 @@
 # barlo
 
-Build desktop applications with [Bun](https://bun.com) and the Chrome you already have.
+Build desktop applications with [Node.js](https://nodejs.org) and the Chrome you already have.
 
 barlo is a port of [GoogleChromeLabs/carlo](https://github.com/GoogleChromeLabs/carlo), which was
 archived in April 2026. Same idea as the original: serve your web app from the runtime, open it in a
@@ -25,40 +25,25 @@ await app.load('index.html')
 </script>
 ```
 
-## Why not `Bun.WebView`?
+## How it works
 
-This project started from the assumption that Bun 1.3.12's `Bun.WebView` could replace Carlo's
-Puppeteer dependency and drive a desktop window directly. It cannot, and it is worth being explicit
-about why:
+barlo spawns Chrome in app mode itself, serves the application from a `node:http` server on
+`127.0.0.1`, and talks the Chrome DevTools Protocol through a ~120-line client on Node's built-in
+`WebSocket`. That is Carlo's architecture, minus Puppeteer.
 
-- `Bun.WebView` is a **headless browser automation API** — a built-in Puppeteer, not a GUI toolkit.
-  `new Bun.WebView({ headless: false })` throws `headless: false is not yet implemented`.
-- Its `backend.argv` escape hatch does not help. Chrome decides it is headless from the *presence* of
-  the `--headless` switch, so `--headless=false` still yields a `HeadlessChrome` user agent.
-- Connecting it to a Chrome you launched yourself (`backend: { type: 'chrome', url }`) does open a
-  live connection, but the view drives a target it creates via `Target.createTarget` — a normal
-  tabbed window (~87px of toolbar), not your app window.
-
-What Bun genuinely brings is everything *around* the window: a built-in HTTP server, a WebSocket
-client good enough to speak CDP directly, and `bun build --compile`. So barlo spawns Chrome in app
-mode itself and talks CDP over a ~120-line client. That is Carlo's architecture, minus Puppeteer.
+barlo was first written for Bun, on the hope that `Bun.WebView` could drive a desktop window. It
+cannot — it is a headless automation API, and `headless: false` is not implemented — and apart
+from `bun build --compile` the Bun version used nothing Node lacks, so requiring Bun was only a
+cost.
 
 ## Install
 
 ```sh
-bun add barlo
 npm install barlo
 ```
 
-Installing from GitHub instead — `bun add github:cbcruk/barlo` — still runs,
-because `exports` sends Bun to `src/index.ts`, but it carries no type
-declarations: `dist/` is generated when the package is packed rather than
-committed, and bun blocks lifecycle scripts and installs no devDependencies for
-git dependencies, so nothing can build it at install time. Use the registry to
-get types.
-
-Requires Bun and a locally installed Chrome, Chromium, Edge, or Brave. barlo checks the usual
-per-platform locations and Playwright's browser cache; override with `BARLO_CHROME_PATH`.
+Requires Node.js 24 or later and a locally installed Chrome, Chromium, Edge, or Brave. barlo checks
+the usual per-platform locations and Playwright's browser cache; override with `BARLO_CHROME_PATH`.
 
 ## API
 
@@ -77,7 +62,8 @@ per-platform locations and Playwright's browser cache; override with `BARLO_CHRO
 
 ### Serving
 
-- `app.serveFolder(folder, prefix?)` — files from disk, refusing paths that escape the folder.
+- `app.serveFolder(folder, prefix?)` — files from disk, refusing paths that escape the folder. The
+  content type comes from the file extension.
 - `app.serveEmbedded(files, prefix?)` — an in-memory `path -> contents` map.
 - `app.serveOrigin(base, prefix?)` — reverse-proxy a prefix onto a remote origin, e.g. a dev server.
 - `app.serveHandler(handler)` — a `Request => Response | undefined` fallthrough handler.
@@ -129,7 +115,7 @@ tagged, all carrying the fields that make them actionable rather than a message 
 
 A classic script's top-level `function` and `var` declarations become properties of `window`, which
 is exactly where the bridge installs its functions. A page containing `function kill` replaces an
-exposed `kill`, and the page's own calls then reach the page instead of Bun — silently, because the
+exposed `kill`, and the page's own calls then reach the page instead of Node — silently, because the
 call still returns a promise.
 
 barlo cannot prevent it: locking the property down makes the page's declaration throw and kills the
@@ -212,33 +198,13 @@ Both `App` and `Window` implement `Symbol.asyncDispose`, so a scope can own them
 // Chrome is gone here, even if the block threw.
 ```
 
-## Single-file executables
-
-```sh
-bun build --compile app.ts --outfile myapp
-```
-
-`serveFolder` reads from disk and therefore **does not survive `--compile`** — a compiled binary has
-no `www` folder next to it and every request 404s. Embed the assets instead:
-
-```ts
-import index from './www/index.html' with { type: 'text' }
-
-app.serveEmbedded({ 'index.html': index as unknown as string })
-```
-
-(The cast is needed only because Bun types every `.html` import as an `HTMLBundle` for its bundler.)
-
-The resulting binary is ~79 MB and needs no Node, no `node_modules`, and no Chromium — just the
-browser already on the machine.
-
 ## Status and caveats
 
 CI opens a real window on Linux, macOS, and Windows on every push, and each runner resolves its own
 system browser — `/Applications/Google Chrome.app/...` on macOS,
 `C:\Program Files\Google\Chrome\Application\chrome.exe` on Windows. The suite covers the app-mode
-window, sizing, folder/embedded/handler serving, the RPC bridge across reloads and windows,
-multi-window, and the compiled binary.
+window, sizing, folder/embedded/handler/proxy serving, the RPC bridge across reloads and windows,
+and multi-window.
 
 The window frame is the one thing that is genuinely platform-specific: `outerHeight - innerHeight` is
 0-11 pixels on Linux, 32 on macOS, and 39 on Windows. And on macOS the height given to `setBounds` does not
@@ -251,33 +217,35 @@ been narrowing that surface for years, and if it goes, this approach goes with i
 ## Development
 
 ```sh
-bun install
-bun run typecheck    # tsc over src, test, and examples
-bun run docs:check   # every export documented, every @example type-checks
-bun run build        # emit dist/*.d.ts
-bun test             # opens real Chrome windows; needs a display
+npm install
+npm run typecheck    # tsc over src, test, examples, and scripts
+npm run docs:check   # every export documented, every @example type-checks
+npm run build        # emit dist/*.js and dist/*.d.ts
+npm test             # opens real Chrome windows; needs a display
 ```
+
+The source runs directly under Node's type stripping, so the tests, the example, and the scripts
+need no build step. That is why relative imports carry their `.ts` extension, which the build
+rewrites to `.js`, and why the source sticks to erasable TypeScript syntax (`erasableSyntaxOnly`).
 
 On a headless machine, run the suite under Xvfb and point barlo at a browser:
 
 ```sh
-bunx playwright install chromium
+npx playwright install chromium
 BARLO_CHROME_PATH=$(echo ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome) \
-  xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test
+  xvfb-run -a --server-args="-screen 0 1280x1024x24" npm test
 ```
 
 ### Packaging
 
-The published package ships both the TypeScript source and generated
-declarations. The `exports` map sends Bun to `src/index.ts`, so stack traces
-point at real source and there is no bundle step at runtime, while `types`
-resolves to `dist/index.d.ts`, so a consumer never type-checks barlo's
-implementation. `prepack` rebuilds the declarations when packing, so a published
-tarball never carries stale output and `dist/` never enters git.
+The published package runs from `dist/`, compiled JavaScript with declarations, because Node does
+not strip types from files under `node_modules`. The TypeScript source ships alongside it so source
+maps and go-to-definition land on real code. `prepack` rebuilds `dist/` when packing, so a
+published tarball never carries stale output and `dist/` never enters git.
 
-`prepare` is deliberately not used: it would run on a git-dependency install,
-where bun installs no devDependencies, and would fail for any consumer who
-trusts the script.
+Installing from GitHub — `npm install github:cbcruk/barlo` — does not work for the same reason:
+`dist/` is not committed. `prepare` is deliberately not used to build it at install time, since it
+would need devDependencies the consumer does not have. Use the registry.
 
 Releases run from a `v*` tag, which the workflow checks against the version in
 `package.json`. Publishing authenticates with npm trusted publishing over OIDC

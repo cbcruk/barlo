@@ -4,16 +4,16 @@
  *
  * The rules in `.claude/rules/jsdoc.md` ask for documentation on every exported
  * symbol and for examples that run when pasted. Both are easy to let rot, so
- * they are checked rather than trusted. Run with `bun run docs:check`.
+ * they are checked rather than trusted. Run with `npm run docs:check`.
  *
  * @module
  */
 
-import { Glob } from 'bun'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const ROOT = join(import.meta.dir, '..')
+const ROOT = join(import.meta.dirname, '..')
 
 /** Top-level `export` forms that need their own JSDoc block. */
 const EXPORT = /^export (async function|function|class|interface|type|const|default)\b/
@@ -24,8 +24,8 @@ const MEMBER = /^  (?!#|\/|\*|\})(?:readonly |static |async |get |set )*[A-Za-z_
 const missing: string[] = []
 const examples: { file: string; code: string }[] = []
 
-for (const rel of [...new Glob('src/**/*.ts').scanSync(ROOT)].sort()) {
-  const text = await Bun.file(join(ROOT, rel)).text()
+for (const rel of globSync('src/**/*.ts', { cwd: ROOT }).sort()) {
+  const text = readFileSync(join(ROOT, rel), 'utf8')
   const lines = text.split('\n')
 
   let inType = false
@@ -47,7 +47,7 @@ for (const rel of [...new Glob('src/**/*.ts').scanSync(ROOT)].sort()) {
   for (const match of text.matchAll(/\*\s*```ts\n([\s\S]*?)\*\s*```/g)) {
     const code = match[1]!
       .split('\n')
-      .map(l => l.replace(/^\s*\*\s?/, ''))
+      .map((l: string) => l.replace(/^\s*\*\s?/, ''))
       .join('\n')
     examples.push({ file: rel, code })
   }
@@ -57,7 +57,7 @@ console.log(`exported symbols missing JSDoc: ${missing.length}`)
 for (const entry of missing) console.log(`  ${entry}`)
 
 // Type-check each example as its own module, from inside the repo so that
-// `barlo` and `bun-types` resolve the way they do for a user.
+// `barlo` and `@types/node` resolve the way they do for a user.
 const dir = mkdtempSync(join(ROOT, 'node_modules', '.doccheck-'))
 try {
   examples.forEach((example, n) => {
@@ -71,8 +71,9 @@ try {
         target: 'ESNext',
         module: 'Preserve',
         moduleResolution: 'bundler',
-        types: ['bun-types'],
+        types: ['node'],
         strict: true,
+        allowImportingTsExtensions: true,
         skipLibCheck: true,
         noEmit: true,
         paths: { barlo: ['../../src/index.ts'] },
@@ -81,7 +82,11 @@ try {
     }),
   )
 
-  const tsc = Bun.spawnSync(['bunx', 'tsc', '--noEmit', '-p', dir], { cwd: ROOT })
+  const tsc = spawnSync(
+    process.execPath,
+    [join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'), '--noEmit', '-p', dir],
+    { cwd: ROOT },
+  )
   const output = (tsc.stdout.toString() + tsc.stderr.toString()).trim()
 
   console.log(`example blocks type-checked: ${examples.length}`)

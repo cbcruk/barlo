@@ -21,21 +21,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
-      # Node 22 ships npm 10, which cannot do the OIDC exchange. 11.5.1 is the
-      # first version that can.
+      # OIDC publishing needs npm 11.5.1 or later, newer than some Node 24
+      # releases bundle.
       - name: Use an npm that speaks OIDC
         run: npm install -g npm@latest
 
-      - run: bun install --frozen-lockfile
+      - run: npm ci
 
       - name: Verify the tag matches package.json
         run: |
@@ -46,11 +42,11 @@ jobs:
             exit 1
           fi
 
-      - run: bun run typecheck
-      - run: bun run docs:check
-      - run: xvfb-run -a --server-args="-screen 0 1280x1024x24" bun test
+      - run: npm run typecheck
+      - run: npm run docs:check
+      - run: xvfb-run -a --server-args="-screen 0 1280x1024x24" npm test
 
-      # `prepack` runs the declaration build, so dist/ is produced here. npm
+      # `prepack` runs the build, so dist/ is produced here. npm
       # also attaches a provenance attestation on its own when publishing this
       # way; `--provenance` is not needed and the repository has to stay public
       # for it to work.

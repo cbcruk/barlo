@@ -1,13 +1,7 @@
 import { cpus, freemem, hostname, platform, release, totalmem, uptime } from 'node:os'
+import { join } from 'node:path'
 
-import { launch } from '../../src/index'
-
-// Imported as text so the example works the same under `bun run` and
-// `bun build --compile`, where there is no www folder on disk. Bun types every
-// .html import as an HTMLBundle for its bundler, so the text form needs a cast.
-import indexHtmlBundle from './www/index.html' with { type: 'text' }
-
-const indexHtml = indexHtmlBundle as unknown as string
+import { launch } from '../../src/index.ts'
 
 const launched = await launch({ title: 'System Info', width: 720, height: 520 })
 if (launched.isErr()) {
@@ -17,10 +11,10 @@ if (launched.isErr()) {
 
 const app = launched.unwrap()
 
-app.serveEmbedded({ 'index.html': indexHtml })
+app.serveFolder(join(import.meta.dirname, 'www'))
 
 await app.exposeFunction('systemInfo', () => ({
-  runtime: `Bun ${Bun.version}`,
+  runtime: `Node ${process.version}`,
   host: hostname(),
   os: `${platform()} ${release()}`,
   cpu: cpus()[0]?.model ?? 'unknown',

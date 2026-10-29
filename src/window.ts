@@ -8,7 +8,7 @@ import { Result } from 'better-result'
 import { statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 
-import type { CDPSession } from './cdp'
+import type { CDPSession } from './cdp.ts'
 import {
   EvaluationError,
   NavigationError,
@@ -17,8 +17,8 @@ import {
   type EvaluateError,
   type LoadError,
   type WindowError,
-} from './errors'
-import { BINDING, bootstrapSource, resolverExpression, shadowedExpression, type RpcCall } from './rpc'
+} from './errors.ts'
+import { BINDING, bootstrapSource, resolverExpression, shadowedExpression, type RpcCall } from './rpc.ts'
 
 /**
  * A window's position and size in screen pixels.
@@ -51,7 +51,7 @@ interface ExecutionContext {
 }
 
 /**
- * A Bun-side function callable from the page.
+ * A Node-side function callable from the page.
  *
  * Arguments arrive from the page as JSON, and the return value travels back
  * the same way, so it must be JSON-serializable. Returning a promise is
@@ -317,7 +317,7 @@ export class Window {
    * properties of `window`, which is where {@linkcode App.exposeFunction}
    * installs its functions. A page declaring `function kill` therefore takes
    * over an exposed `kill`, and calls from the page reach the page itself
-   * instead of Bun — silently, since the call still returns a promise.
+   * instead of Node — silently, since the call still returns a promise.
    *
    * Wrap the page's script so it declares nothing globally, use
    * `<script type="module">`, or expose the function under a name the page does
@@ -368,7 +368,7 @@ export class Window {
    * Runs code in the page and returns its result.
    *
    * A function is serialized and called with the given arguments, which means
-   * it runs in the page and cannot close over anything in Bun. A string is
+   * it runs in the page and cannot close over anything in Node. A string is
    * evaluated as an expression. Promises are awaited before the value is
    * returned.
    *
@@ -573,10 +573,11 @@ export class Window {
    * @example Saving a screenshot
    * ```ts
    * import { launch } from "barlo";
+   * import { writeFile } from "node:fs/promises";
    *
    * const app = (await launch()).unwrap();
    *
-   * await Bun.write("shot.png", (await app.screenshot()).unwrap());
+   * await writeFile("shot.png", (await app.screenshot()).unwrap());
    * ```
    */
   async screenshot(

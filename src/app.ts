@@ -1,19 +1,20 @@
 /**
- * The barlo application: a Bun-served origin plus one or more Chrome app
+ * The barlo application: a locally served origin plus one or more Chrome app
  * windows.
  *
  * @module
  */
 
 import { Result } from 'better-result'
-import { spawn, type Subprocess } from 'bun'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
-import { CDPConnection, type CDPSession, type SendError } from './cdp'
-import { findChrome } from './find-chrome'
-import { AppServer, BLANK_PATH, type EmbeddedFiles, type RequestHandler } from './server'
+import { CDPConnection, type CDPSession, type SendError } from './cdp.ts'
+import { findChrome } from './find-chrome.ts'
+import { AppServer, BLANK_PATH, type EmbeddedFiles, type RequestHandler } from './server.ts'
 import {
   BrowserGoneError,
   ChromeNotFoundError,
@@ -24,8 +25,8 @@ import {
   type LaunchError,
   type LoadError,
   type WindowError,
-} from './errors'
-import { Window, type ExposedFunction } from './window'
+} from './errors.ts'
+import { Window, type ExposedFunction } from './window.ts'
 
 /** Settings for {@linkcode launch}. */
 export interface LaunchOptions {
@@ -79,7 +80,7 @@ export interface LaunchOptions {
   userDataDir?: string
 
   /**
-   * Forward Chrome's stderr to Bun's. Defaults to `false`.
+   * Forward Chrome's stderr to this process's. Defaults to `false`.
    *
    * Chrome is noisy even when healthy, but this is where a startup crash
    * reports itself.
@@ -117,7 +118,7 @@ async function readEndpoint(
       const url = endpoint.unwrapOr(undefined)
       if (url) return Result.ok(url)
     }
-    await Bun.sleep(50)
+    await sleep(50)
   }
   return Result.err(
     new LaunchTimeoutError({
@@ -140,7 +141,7 @@ async function readEndpoint(
  */
 export class App {
   #server = new AppServer()
-  #chrome: Subprocess | undefined
+  #chrome: ChildProcess | undefined
   #connection: CDPConnection | undefined
   #browser: CDPSession | undefined
   #windows: Window[] = []
@@ -164,9 +165,6 @@ export class App {
   /**
    * Serves files from a folder on disk. See {@linkcode AppServer.serveFolder}.
    *
-   * > Does not survive `bun build --compile`; use
-   * > {@linkcode App.serveEmbedded} for compiled applications.
-   *
    * @param folder Path to the folder, resolved against the working directory.
    * @param prefix URL prefix to mount it under.
    */
@@ -189,21 +187,24 @@ export class App {
    * Serves an in-memory map of path to contents. See
    * {@linkcode AppServer.serveEmbedded}.
    *
-   * Unlike {@linkcode App.serveFolder}, the contents live in the bundle rather
-   * than on disk, so this is the serving method that survives
-   * `bun build --compile`.
+   * Unlike {@linkcode App.serveFolder}, the contents live in memory rather
+   * than on disk, which suits pages generated at runtime or inlined by a
+   * bundler.
    *
    * @param files The paths to serve and their contents.
    * @param prefix URL prefix to mount them under.
    *
-   * @example Embedding a page into a compiled binary
+   * @example Serving a generated page
    * ```ts
    * import { launch } from "barlo";
-   * import index from "./www/index.html" with { type: "text" };
    *
    * const app = (await launch()).unwrap();
    *
-   * app.serveEmbedded({ "index.html": index as unknown as string });
+   * app.serveEmbedded({
+   *   "index.html": "<!doctype html><script type=module src=app.js></script>",
+   *   "app.js": "document.body.textContent = await window.cwd()",
+   * });
+   * await app.exposeFunction("cwd", () => process.cwd());
    * await app.load("index.html");
    * ```
    */
@@ -222,7 +223,7 @@ export class App {
   }
 
   /**
-   * Makes a Bun-side function callable from the page as `window[name]`.
+   * Makes a function in this process callable from the page as `window[name]`.
    *
    * The page-side function always returns a promise, whatever `fn` returns.
    * Arguments and results round-trip as JSON, and a thrown error rejects the
@@ -236,7 +237,7 @@ export class App {
    * > The page can take the name back. A classic script's top-level `function`
    * > and `var` declarations become properties of `window`, so a page
    * > containing `function kill` replaces an exposed `kill` and its own calls
-   * > reach itself instead of Bun — silently, since the call still returns a
+   * > reach itself instead of this process — silently, since the call still returns a
    * > promise. Wrap the page's script so it declares nothing globally, use
    * > `<script type="module">`, or expose under a name the page does not
    * > declare, such as `__kill`. barlo warns after each load, and
@@ -250,17 +251,18 @@ export class App {
    * @param name The global to define on the page. Overwrites an existing
    * global of that name, and can in turn be overwritten by one the page
    * declares.
-   * @param fn The function to run in Bun. May be async.
+   * @param fn The function to run in this process. May be async.
    * @returns Nothing once every open window can call it, or the first window
    * that could not be reached.
    *
    * @example Reading a file for the page
    * ```ts
    * import { launch } from "barlo";
+   * import { readFile } from "node:fs/promises";
    *
    * const app = (await launch()).unwrap();
    *
-   * await app.exposeFunction("readFile", (path: string) => Bun.file(path).text());
+   * await app.exposeFunction("readFile", (path: string) => readFile(path, "utf8"));
    * ```
    *
    * The page calls `await window.readFile("notes.md")`.
@@ -295,10 +297,10 @@ export class App {
     if (chrome.isErr()) return chrome
     this.#executable = chrome.unwrap()
 
-    // mkdtemp, Bun.serve and spawn are the foreign throwing APIs in this path;
+    // mkdtemp, listen and spawn are the foreign throwing APIs in this path;
     // wrapping them keeps the whole of startup in the Result world.
-    const prepared = Result.try({
-      try: () => {
+    const prepared = await Result.tryPromise({
+      try: async () => {
         if (this.#options.userDataDir) {
           this.#profile = this.#options.userDataDir
         } else {
@@ -306,13 +308,20 @@ export class App {
           this.#ownsProfile = true
         }
 
-        const origin = this.#server.listen()
+        const origin = await this.#server.listen()
 
-        this.#chrome = spawn([this.#executable, ...this.#chromeArgs(origin)], {
-          stdout: 'ignore',
-          stderr: this.#options.verbose ? 'inherit' : 'ignore',
-          onExit: () => this.#onChromeExit(),
+        const chrome = spawn(this.#executable, this.#chromeArgs(origin), {
+          stdio: ['ignore', 'ignore', this.#options.verbose ? 'inherit' : 'ignore'],
         })
+        // A binary that cannot be started reports it as an event rather than by
+        // throwing, so wait for one or the other.
+        const failed = await new Promise<Error | undefined>(resolve => {
+          chrome.once('spawn', () => resolve(undefined))
+          chrome.once('error', resolve)
+        })
+        if (failed) throw failed
+        chrome.once('exit', () => this.#onChromeExit())
+        this.#chrome = chrome
       },
       catch: (cause) =>
         new BrowserGoneError({
@@ -371,7 +380,7 @@ export class App {
         .unwrap()
         .targetInfos.find((t: any) => t.type === 'page' && !known.has(t.targetId))
       if (page) return Result.ok(page.targetId as string)
-      await Bun.sleep(50)
+      await sleep(50)
     }
     return Result.err(
       new LaunchTimeoutError({
@@ -444,8 +453,9 @@ export class App {
     const known = new Set(this.#windows.map(w => w.targetId))
     const { width = 800, height = 600 } = this.#options
 
-    spawn([this.#executable, `--app=${url.href}`, `--user-data-dir=${this.#profile}`,
-      `--window-size=${width},${height}`], { stdout: 'ignore', stderr: 'ignore' })
+    // This process only hands the request to the running browser and exits.
+    spawn(this.#executable, [`--app=${url.href}`, `--user-data-dir=${this.#profile}`,
+      `--window-size=${width},${height}`], { stdio: 'ignore' }).once('error', () => undefined)
 
     const targetId = await this.#waitForPageTarget(known)
     if (targetId.isErr()) return targetId
@@ -550,7 +560,7 @@ export class App {
    * Registers a handler for the application exiting.
    *
    * Fires when the last window closes, when Chrome quits, and when
-   * {@linkcode App.exit} is called. barlo does not stop the Bun process
+   * {@linkcode App.exit} is called. barlo does not stop the Node process
    * itself, so this is where an application usually calls `process.exit`.
    *
    * @param handler Called once, when the application exits.

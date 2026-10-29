@@ -1,5 +1,5 @@
 /**
- * Build desktop applications with Bun and the Chrome already installed on the
+ * Build desktop applications with Node.js and the Chrome already installed on the
  * machine.
  *
  * barlo is a port of [carlo](https://github.com/GoogleChromeLabs/carlo). Call
@@ -28,10 +28,10 @@
 
 import type { Result } from 'better-result'
 
-import { App, type LaunchOptions } from './app'
-import type { LaunchError } from './errors'
+import { App, type LaunchOptions } from './app.ts'
+import type { LaunchError } from './errors.ts'
 
-export { App, type LaunchOptions } from './app'
+export { App, type LaunchOptions } from './app.ts'
 export {
   BrowserGoneError,
   ChromeNotFoundError,
@@ -46,10 +46,10 @@ export {
   type LaunchPhase,
   type LoadError,
   type WindowError,
-} from './errors'
-export { Window, type Bounds, type ExposedFunction } from './window'
-export { type EmbeddedFiles, type RequestHandler } from './server'
-export { findChrome } from './find-chrome'
+} from './errors.ts'
+export { Window, type Bounds, type ExposedFunction } from './window.ts'
+export { type EmbeddedFiles, type RequestHandler } from './server.ts'
+export { findChrome } from './find-chrome.ts'
 
 /**
  * Starts Chrome in app mode and returns the running application.
